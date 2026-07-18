@@ -17,6 +17,17 @@ F1_MIN = 20.0
 F1_MAX = 200.0
 MAX_VOICES = 32
 
+# Native MIDI-note harmonic source (standalone keyboard playability)
+# Anchor MIDI note that represents f₁ (C1 = 24), matching NaturalHarmony.
+DEFAULT_ANCHOR_MIDI = 24
+# Default standalone mode: play generic MIDI keyboards without NH beacon.
+NATIVE_MIDI_SOURCE_ENABLED = True
+# Ports whose names contain these substrings are left to dedicated controllers.
+NATIVE_MIDI_EXCLUDE_PATTERNS = ("Launchpad", "Minilab")
+# Velocity → voice gain bounds (linear map, then clamp)
+NATIVE_MIDI_VELOCITY_GAIN_MIN = 0.0
+NATIVE_MIDI_VELOCITY_GAIN_MAX = 1.0
+
 # OSC
 PLANNED_OSC_NAMESPACE = "/shaper"
 WIRE_OSC_NAMESPACE = "/digital"

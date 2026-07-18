@@ -21,6 +21,15 @@ def test_slave_listener_is_opt_in() -> None:
     assert parser.parse_args(["--slave"]).slave is True
 
 
+def test_native_midi_defaults_and_flags() -> None:
+    parser = build_parser()
+    defaults = parser.parse_args([])
+    assert defaults.no_native_midi is False
+    assert defaults.f1 == 40.40
+    assert defaults.anchor == 24
+    assert parser.parse_args(["--no-native-midi"]).no_native_midi is True
+
+
 def test_local_osc_table_stays_wire_compatible() -> None:
     source = (REPO_ROOT / "src/harmonic_shaper/osc_receiver.py").read_text()
     addresses = set(re.findall(r'\.map\("([^"]+)"', source))

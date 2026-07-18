@@ -12,6 +12,7 @@ MODULES = [
     "harmonic_shaper.audio_engine",
     "harmonic_shaper.config",
     "harmonic_shaper.contract_codec",
+    "harmonic_shaper.harmonic_mapping",
     "harmonic_shaper.main",
     "harmonic_shaper.midi_control",
     "harmonic_shaper.osc_receiver",

@@ -27,12 +27,19 @@ python -m harmonic_shaper
 harmonic-shaper
 ```
 
-The default process starts the audio engine, native OSC listener, both MIDI
-controllers when present, and the FastAPI state service. Useful flags:
+The default process starts the audio engine, native OSC listener, MIDI
+controllers when present (Launchpad, Minilab3, and a **native keyboard note
+source**), and the FastAPI state service.
+
+Standalone mode maps generic MIDI keyboard notes to harmonic voices using the
+natural-harmonic series (`f1` + anchor MIDI note) — no NaturalHarmony beacon is
+required. Useful flags:
 
 ```bash
-python -m harmonic_shaper --slave       # opt in to NH /beacon/* broadcasts
-python -m harmonic_shaper --no-audio    # headless control/API process
+python -m harmonic_shaper --slave            # opt in to NH /beacon/* broadcasts
+python -m harmonic_shaper --f1 40.40 --anchor 24
+python -m harmonic_shaper --no-native-midi   # keyboards off; pads/CC still on
+python -m harmonic_shaper --no-audio         # headless control/API process
 python -m harmonic_shaper --no-midi
 python -m harmonic_shaper --no-api
 python -m harmonic_shaper --help

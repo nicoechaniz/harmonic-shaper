@@ -1,4 +1,4 @@
-"""Launchpad Mini and Minilab3 control for the standalone Harmonic Shaper.
+"""Launchpad Mini, Minilab3, and native keyboard control for the Shaper.
 
 Brought from NaturalHarmony/harmonic_beacon/main.py (the original Pad Mode
 logic) and adapted to:
@@ -8,6 +8,8 @@ logic) and adapted to:
   - Direct routing into the standalone Shaper voice store.
   - Polyphony limit + visual note stealing on the Launchpad (the new lights
     turn off when the limit is exceeded).
+  - Native MIDI-note harmonic source for generic keyboards (no NaturalHarmony
+    beacon required): see :class:`NativeNoteHandler` / :class:`NativeMidiNoteSource`.
 
 Pad layout (Launchpad Mini, Programmer mode, stride 16):
 
@@ -44,12 +46,17 @@ Polyphony:
   - MAX_VOICES (32 by default) total active voices.
   - When a new toggle-on would exceed the limit, the oldest toggled harmonic
     is auto-released (and its light turned off).
+
+Native keyboard voice lifecycle:
+  - note-on → map_midi_note(f1, anchor) → voice_on(band, voice_id, freq, gain)
+  - note-off / note-on vel=0 → voice_off(originating voice_id only)
+  - concurrent notes tracked per MIDI note number so releases never cross
 """
 
 import logging
 import threading
 from collections import OrderedDict
-from typing import Optional, Set
+from typing import Optional, Sequence, Set
 
 try:
     import mido
@@ -58,10 +65,245 @@ except ImportError:
     HAS_MIDO = False
     mido = None
 
+from .harmonic_mapping import map_midi_note, velocity_to_gain
 from .state import VoiceParameterStore
 from . import config
 
 log = logging.getLogger(__name__)
+
+
+# ─── Native MIDI-note harmonic source ───────────────────────────────────────
+
+
+class NativeNoteHandler:
+    """Port-independent MIDI note → Shaper voice lifecycle.
+
+    Safe for headless probes: feed ``note_on`` / ``note_off`` without opening
+    hardware ports.  Voice IDs are allocated in a high range so they do not
+    collide with Launchpad local IDs (which start at 1).
+
+    Policy
+    ------
+    - Each held MIDI note owns exactly one ``voice_id``.
+    - Note-off and note-on with velocity 0 release only that note's voice.
+    - Concurrent different notes never release each other via note-off.
+    - Same-note re-trigger releases the previous voice then starts a new one.
+    - Frequency uses live ``store.f1`` so OSC/API f₁ updates apply.
+    - Band index is ``NoteMapping.store_band(N_BANDS)`` (lattice 1..32).
+    """
+
+    # Keep well clear of Launchpad/Minilab local counters (start at 1).
+    _VOICE_ID_BASE = 1_000_000
+
+    def __init__(
+        self,
+        store: VoiceParameterStore,
+        *,
+        anchor_midi: int = config.DEFAULT_ANCHOR_MIDI,
+        enabled: bool = config.NATIVE_MIDI_SOURCE_ENABLED,
+        velocity_gain_min: float = config.NATIVE_MIDI_VELOCITY_GAIN_MIN,
+        velocity_gain_max: float = config.NATIVE_MIDI_VELOCITY_GAIN_MAX,
+        max_bands: int = config.N_BANDS,
+    ) -> None:
+        self._store = store
+        self._anchor_midi = int(anchor_midi)
+        self._enabled = bool(enabled)
+        self._vel_min = float(velocity_gain_min)
+        self._vel_max = float(velocity_gain_max)
+        self._max_bands = int(max_bands)
+        self._lock = threading.RLock()
+        # midi_note -> voice_id (originating voice for that key)
+        self._held: dict[int, int] = {}
+        self._next_voice_id = self._VOICE_ID_BASE
+
+    # ── Configuration ────────────────────────────────────────────────────
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enabled = bool(enabled)
+            if not self._enabled:
+                self._release_all_locked()
+
+    @property
+    def anchor_midi(self) -> int:
+        return self._anchor_midi
+
+    def set_anchor_midi(self, anchor_midi: int) -> None:
+        with self._lock:
+            self._anchor_midi = int(anchor_midi)
+
+    @property
+    def held_notes(self) -> dict[int, int]:
+        """Snapshot of midi_note → voice_id for active native notes."""
+        with self._lock:
+            return dict(self._held)
+
+    # ── Note lifecycle ───────────────────────────────────────────────────
+
+    def note_on(self, midi_note: int, velocity: int) -> Optional[int]:
+        """Handle note-on.  Velocity 0 is treated as note-off.
+
+        Returns the allocated ``voice_id``, or ``None`` if ignored/released.
+        """
+        if not self._enabled:
+            return None
+        if velocity <= 0:
+            self.note_off(midi_note)
+            return None
+
+        note = max(0, min(127, int(midi_note)))
+        with self._lock:
+            # Re-trigger: release previous voice for this key first
+            prev = self._held.pop(note, None)
+            if prev is not None:
+                self._store.voice_off(prev)
+
+            mapping = map_midi_note(
+                note,
+                f1=self._store.f1,
+                anchor_midi=self._anchor_midi,
+            )
+            band = mapping.store_band(self._max_bands)
+            gain = velocity_to_gain(
+                velocity,
+                min_gain=self._vel_min,
+                max_gain=self._vel_max,
+            )
+            vid = self._next_voice_id
+            self._next_voice_id += 1
+            self._held[note] = vid
+            self._store.voice_on(band, vid, mapping.frequency_hz, gain=gain)
+            log.debug(
+                "Native note ON  midi=%d n=%d band=%d freq=%.3fHz gain=%.3f vid=%d src=%s",
+                note,
+                mapping.harmonic_n,
+                band,
+                mapping.frequency_hz,
+                gain,
+                vid,
+                mapping.source,
+            )
+            return vid
+
+    def note_off(self, midi_note: int) -> Optional[int]:
+        """Release the voice that originated from this MIDI note, if any."""
+        note = max(0, min(127, int(midi_note)))
+        with self._lock:
+            vid = self._held.pop(note, None)
+            if vid is None:
+                return None
+            self._store.voice_off(vid)
+            log.debug("Native note OFF midi=%d vid=%d", note, vid)
+            return vid
+
+    def handle_message(self, msg) -> None:
+        """Dispatch a mido-like message (``type``, ``note``, ``velocity``)."""
+        if not self._enabled:
+            return
+        if msg.type == "note_on":
+            self.note_on(msg.note, msg.velocity)
+        elif msg.type == "note_off":
+            self.note_off(msg.note)
+
+    def panic(self) -> None:
+        """Release all native-held voices (does not call store.panic)."""
+        with self._lock:
+            self._release_all_locked()
+
+    def _release_all_locked(self) -> None:
+        for vid in list(self._held.values()):
+            self._store.voice_off(vid)
+        self._held.clear()
+
+
+class NativeMidiNoteSource:
+    """Open generic keyboard MIDI ports and feed :class:`NativeNoteHandler`.
+
+    Ports matching Launchpad / Minilab patterns are skipped so dedicated
+    controllers keep exclusive ownership of those devices.
+    """
+
+    def __init__(
+        self,
+        handler: NativeNoteHandler,
+        exclude_patterns: Sequence[str] = config.NATIVE_MIDI_EXCLUDE_PATTERNS,
+    ) -> None:
+        if not HAS_MIDO:
+            raise ImportError("mido is required for MIDI control.")
+        self._handler = handler
+        self._exclude_patterns = tuple(exclude_patterns)
+        self._ports: list = []
+        self._threads: list[threading.Thread] = []
+        self._running = False
+
+    def start(self) -> None:
+        if not self._handler.enabled:
+            log.info("Native MIDI note source disabled by configuration")
+            return
+        names = self._eligible_ports()
+        if not names:
+            log.info(
+                "Native MIDI note source: no generic keyboard ports found "
+                "(excluded patterns=%s)",
+                self._exclude_patterns,
+            )
+            return
+        self._running = True
+        for name in names:
+            try:
+                port = mido.open_input(name)
+            except Exception as exc:
+                log.warning("Could not open MIDI input %r: %s", name, exc)
+                continue
+            self._ports.append(port)
+            thread = threading.Thread(
+                target=self._run_port,
+                args=(port, name),
+                name=f"shaper-native-midi-{name[:24]}",
+                daemon=True,
+            )
+            thread.start()
+            self._threads.append(thread)
+            log.info("Native MIDI note source listening: %s", name)
+
+    def stop(self) -> None:
+        self._running = False
+        self._handler.panic()
+        for port in self._ports:
+            try:
+                port.close()
+            except Exception:
+                pass
+        self._ports.clear()
+        for thread in self._threads:
+            thread.join(timeout=1.0)
+        self._threads.clear()
+
+    def panic(self) -> None:
+        self._handler.panic()
+
+    def _eligible_ports(self) -> list[str]:
+        result: list[str] = []
+        for name in mido.get_input_names():
+            lower = name.lower()
+            if any(pat.lower() in lower for pat in self._exclude_patterns):
+                continue
+            result.append(name)
+        return result
+
+    def _run_port(self, port, name: str) -> None:
+        try:
+            for msg in port:
+                if not self._running:
+                    break
+                self._handler.handle_message(msg)
+        except Exception as exc:
+            if self._running:
+                log.debug("Native MIDI port %r closed: %s", name, exc)
 
 
 class LaunchpadMiniControl:

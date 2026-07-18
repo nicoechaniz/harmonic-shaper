@@ -11,7 +11,12 @@ from collections.abc import Sequence
 
 from . import config
 from .audio_engine import AudioEngine
-from .midi_control import LaunchpadMiniControl, Minilab3Control
+from .midi_control import (
+    LaunchpadMiniControl,
+    Minilab3Control,
+    NativeMidiNoteSource,
+    NativeNoteHandler,
+)
 from .osc_receiver import ShaperOSCReceiver
 from .state import VoiceParameterStore
 
@@ -24,7 +29,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-midi", action="store_true", help="List MIDI ports and exit")
     parser.add_argument("--device", help="Audio device ID or name substring")
     parser.add_argument("--no-audio", action="store_true", help="Disable the audio stream")
-    parser.add_argument("--no-midi", action="store_true", help="Disable Launchpad and Minilab3")
+    parser.add_argument(
+        "--no-midi",
+        action="store_true",
+        help="Disable Launchpad, Minilab3, and native keyboard MIDI",
+    )
+    parser.add_argument(
+        "--no-native-midi",
+        action="store_true",
+        help="Disable native MIDI-note harmonic source (generic keyboards)",
+    )
+    parser.add_argument(
+        "--f1",
+        type=float,
+        default=config.DEFAULT_F1,
+        help=f"Fundamental frequency f1 in Hz (default {config.DEFAULT_F1})",
+    )
+    parser.add_argument(
+        "--anchor",
+        type=int,
+        default=config.DEFAULT_ANCHOR_MIDI,
+        help=f"Anchor MIDI note for f1 (default {config.DEFAULT_ANCHOR_MIDI} = C1)",
+    )
     parser.add_argument("--no-osc", action="store_true", help="Disable all OSC input")
     parser.add_argument("--no-api", action="store_true", help="Disable HTTP/WebSocket state API")
     parser.add_argument(
@@ -75,6 +101,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     store = VoiceParameterStore()
+    store.update_f1(float(args.f1))
+
+    native_enabled = (
+        config.NATIVE_MIDI_SOURCE_ENABLED
+        and not args.no_midi
+        and not args.no_native_midi
+    )
+    native_handler = NativeNoteHandler(
+        store,
+        anchor_midi=int(args.anchor),
+        enabled=native_enabled,
+    )
+
     audio = None if args.no_audio else AudioEngine(store, device=args.device or config.AUDIO_DEVICE)
     osc = None
     if not args.no_osc:
@@ -91,7 +130,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         launchpad = LaunchpadMiniControl(store)
         minilab = Minilab3Control(store)
         midi_controls.extend((launchpad, minilab))
-        store._panic_callback = launchpad.panic
+        if native_enabled:
+            midi_controls.append(NativeMidiNoteSource(native_handler))
+
+        def _panic_surfaces() -> None:
+            launchpad.panic()
+            native_handler.panic()
+
+        store._panic_callback = _panic_surfaces
 
     api_server = None
     api_thread = None
@@ -106,10 +152,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGHUP, _request_shutdown)
 
     log.info(
-        "Starting Harmonic Shaper: f1=%.2f Hz, bands=%d, polyphony=%d",
-        config.DEFAULT_F1,
+        "Starting Harmonic Shaper: f1=%.2f Hz, anchor_midi=%d, bands=%d, polyphony=%d, native_midi=%s",
+        store.f1,
+        native_handler.anchor_midi,
         config.N_BANDS,
         config.MAX_VOICES,
+        native_enabled,
     )
 
     try:
@@ -155,6 +203,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             log.info("Planned namespace (not yet on wire): /shaper/*")
             if args.slave:
                 log.info("Slave OSC enabled: %s:%d /beacon/*", args.osc_host, args.slave_port)
+            else:
+                log.info("Slave OSC off (pass --slave for optional /beacon/*)")
+        if native_enabled:
+            log.info(
+                "Native MIDI note source ON (anchor=%d, f1=%.2f Hz)",
+                native_handler.anchor_midi,
+                store.f1,
+            )
         if not args.no_api:
             log.info("State API: http://%s:%d (WebSocket /ws)", args.api_host, args.api_port)
         log.info("Shaper running; press Ctrl-C to stop")
