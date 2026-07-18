@@ -41,6 +41,8 @@ if _SRC not in sys.path:
 from harmonic_shaper.contract_codec import (  # noqa: E402
     check_golden_sidecar,
     contract_id_from_manifest,
+    decode_manifest,
+    encode_manifest,
     load_manifest,
     validate_manifest,
 )
@@ -126,6 +128,18 @@ class ShaperContractTests(unittest.TestCase):
         golden = GOLDEN_PATH.read_text(encoding="ascii").strip()
         self.assertEqual(computed, golden)
         self.assertEqual(check_golden_sidecar(manifest, GOLDEN_PATH), golden)
+
+    def test_canonical_round_trip_preserves_golden_identity(self) -> None:
+        manifest = load_manifest(CONTRACT_PATH)
+        encoded = encode_manifest(manifest)
+        decoded = decode_manifest(encoded)
+
+        self.assertEqual(decoded, manifest)
+        self.assertEqual(encode_manifest(decoded), encoded)
+        self.assertEqual(
+            contract_id_from_manifest(decoded),
+            check_golden_sidecar(decoded, GOLDEN_PATH),
+        )
 
     def test_voice_model_alias_enabled(self) -> None:
         manifest = load_manifest(CONTRACT_PATH)

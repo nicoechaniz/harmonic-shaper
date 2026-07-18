@@ -27,6 +27,7 @@ except (ImportError, OSError) as exc:
 
 from .state import VoiceParameterStore
 from . import config
+from .audio_levels import soft_limit
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +42,6 @@ class AudioEngine:
         block_size: int = config.AUDIO_BLOCK_SIZE,
         device: Optional[int | str] = config.AUDIO_DEVICE,
     ):
-        if not HAS_SOUNDDEVICE:
-            detail = str(SOUNDDEVICE_IMPORT_ERROR or "not installed")
-            raise ImportError(f"sounddevice/PortAudio is required: {detail}")
         self._store = store
         self._sample_rate = sample_rate
         self._block_size = block_size
@@ -59,6 +57,9 @@ class AudioEngine:
     def start(self) -> None:
         if self._running:
             return
+        if not HAS_SOUNDDEVICE:
+            detail = str(SOUNDDEVICE_IMPORT_ERROR or "not installed")
+            raise ImportError(f"sounddevice/PortAudio is required: {detail}")
         self._stream = sd.OutputStream(
             samplerate=self._sample_rate,
             blocksize=self._block_size,
@@ -227,7 +228,7 @@ class AudioEngine:
         if sink is not None:
             sink.append(mix.copy())
 
-        mix = np.tanh(mix * 1.05) * 0.95
+        mix = soft_limit(mix)
         outdata[:] = mix
 
     def _on_stream_finished(self) -> None:

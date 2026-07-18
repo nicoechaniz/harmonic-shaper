@@ -10,7 +10,7 @@ algorithm in numpy:
       3. Each active voice plays a pure sine at f0·n
       4. Per-voice gain from STFT magnitude (mapped dB → 0..1)
       5. Master sum normalized by 1/sqrt(N_active)
-      6. Soft-clip with tanh at output
+      6. Optionally apply the same bounded tanh output stage as the live engine
 
 Output: 16-bit stereo WAV at 44.1 kHz.
 
@@ -22,7 +22,9 @@ The pipeline is split into two phases:
     librosa work happens here, ONCE.
 
   synthesize_prepared(prepared, ...) -> np.ndarray
-    Re-render audio from the cached dict. Cheap — no librosa calls.
+    Re-render audio from the cached dict. Cheap — no librosa calls. Returns the
+    pre-limiter mix by default for analysis, or the declared ±0.95 output range
+    with limit_output=True.
     Supports per-harmonic gain overrides (per_harmonic_gains) and per-harmonic
     waveform overrides (wave_shapes).
 
@@ -59,6 +61,7 @@ import numpy as np
 log = logging.getLogger("synth_pure")
 
 from .voice_cache import VoiceCache
+from .audio_levels import OUTPUT_LIMIT, soft_limit
 
 N_HARMONICS = 32
 SAMPLE_RATE = 44100
@@ -474,7 +477,8 @@ def synthesize_prepared(prepared: dict,
                         spectral_tilt_db: float = -12.0,
                         per_harmonic_gains: dict | None = None,
                         wave_shapes: dict | None = None,
-                        noise_mix_db: float = -12.0) -> np.ndarray:
+                        noise_mix_db: float = -12.0,
+                        limit_output: bool = False) -> np.ndarray:
     """Phase 2: render audio from a cached analysis dict.
 
     Parameters
@@ -518,12 +522,15 @@ def synthesize_prepared(prepared: dict,
     noise_mix_db : float
         Level in dB for mixing extracted aperiodic residual after synthesis.
         Default -12.0. Use <= -120.0 to disable mixing.
+    limit_output : bool
+        Apply the live engine's ``tanh(mix * 1.05) * 0.95`` output stage.
+        The default is False so analysis callers can inspect pre-limiter peaks.
 
     Returns
     -------
-    np.ndarray, shape (total_samples,), dtype float64, range typically
-    within [-1, 1] but NOT normalized — caller's responsibility to peak-
-    normalize / soft-clip before writing 16-bit WAV.
+    np.ndarray, shape (total_samples,), dtype float64. With ``limit_output``
+    true, every finite sample is in the declared range [-0.95, 0.95]. With it
+    false, this is the unbounded pre-limiter mix used for level diagnosis.
     """
     # Sanity check — make sure we got a real prepared dict and not raw audio.
     if not isinstance(prepared, dict):
@@ -605,7 +612,10 @@ def synthesize_prepared(prepared: dict,
     # Per-voice state
     phases = np.zeros(N_HARMONICS + 1)  # index 0 unused, 1..32
     envs = np.zeros(N_HARMONICS + 1)
-    last_active = np.zeros(N_HARMONICS + 1, dtype=bool)
+    # The live callback retains a voice's last parameters while its release
+    # envelope decays. Mirror that behavior by holding the last active frame's
+    # gain instead of replacing it with the new inactive frame's -120 dB.
+    held_gains_db = np.full(N_HARMONICS + 1, -120.0, dtype=np.float64)
 
     out = np.zeros(total_samples, dtype=np.float64)
     block_size = 512
@@ -629,21 +639,25 @@ def synthesize_prepared(prepared: dict,
     # Track previous block's active harmonic mask so we can detect set changes
     # and apply boundary crossfading to avoid clicks from phase discontinuities.
     prev_active_mask: np.ndarray | None = None
+    prev_frame_gains: np.ndarray | None = None
 
     # Per-sample renderer extracted so crossfade path can reuse without duplication.
-    # Mutates the provided phases_arr/envs_arr in place and returns the sample value.
+    # Mutates the provided voice state arrays in place and returns the sample value.
     def _next_sample(frac: float, ft: float, use_active: np.ndarray,
-                     phases_arr: np.ndarray, envs_arr: np.ndarray) -> float:
+                     phases_arr: np.ndarray, envs_arr: np.ndarray,
+                     gains_arr: np.ndarray, gain_frame: np.ndarray) -> float:
         mix = 0.0
         for n in range(1, N_HARMONICS + 1):
             target_env = 1.0 if use_active[n - 1] else 0.0
+            if target_env > 0.0:
+                gains_arr[n] = gain_frame[n - 1]
             if target_env > envs_arr[n]:
                 envs_arr[n] = min(target_env, envs_arr[n] + 1.0 / (0.010 * SAMPLE_RATE))
             else:
                 envs_arr[n] = max(target_env, envs_arr[n] - 1.0 / (0.030 * SAMPLE_RATE))
             if envs_arr[n] <= 0:
                 continue
-            g_db = frame_gains[n - 1]
+            g_db = gains_arr[n]
             g_lin = max(0.0, min(1.0, (g_db + floor_abs) / floor_abs))
             if gain_curve == "sqrt":
                 g_norm = np.sqrt(g_lin)
@@ -711,17 +725,24 @@ def synthesize_prepared(prepared: dict,
             # block boundary, which matches end of prior block).
             old_phases = phases.copy()
             old_envs = envs.copy()
+            old_gains_db = held_gains_db.copy()
             old_samples = np.empty(cf, dtype=np.float64)
             for s in range(cf):
                 frac = (s + 0.5) / block_size if block_size > 0 else 0
                 ft = ft_start + (ft_end - ft_start) * frac
-                old_samples[s] = _next_sample(frac, ft, prev_active_mask, old_phases, old_envs)
+                old_samples[s] = _next_sample(
+                    frac, ft, prev_active_mask, old_phases, old_envs,
+                    old_gains_db, prev_frame_gains,
+                )
             # Render same cf samples under the NEW active set (advances real state).
             new_samples = np.empty(cf, dtype=np.float64)
             for s in range(cf):
                 frac = (s + 0.5) / block_size if block_size > 0 else 0
                 ft = ft_start + (ft_end - ft_start) * frac
-                new_samples[s] = _next_sample(frac, ft, active_mask, phases, envs)
+                new_samples[s] = _next_sample(
+                    frac, ft, active_mask, phases, envs,
+                    held_gains_db, frame_gains,
+                )
             # Linear crossfade: old fades out, new fades in.
             for s in range(cf):
                 alpha = (s + 0.5) / cf
@@ -730,12 +751,18 @@ def synthesize_prepared(prepared: dict,
             for s in range(cf, n_samples):
                 frac = (s + 0.5) / block_size if block_size > 0 else 0
                 ft = ft_start + (ft_end - ft_start) * frac
-                out[block_start + s] = _next_sample(frac, ft, active_mask, phases, envs)
+                out[block_start + s] = _next_sample(
+                    frac, ft, active_mask, phases, envs,
+                    held_gains_db, frame_gains,
+                )
         else:
             for s in range(n_samples):
                 frac = (s + 0.5) / block_size if block_size > 0 else 0
                 ft = ft_start + (ft_end - ft_start) * frac
-                out[block_start + s] = _next_sample(frac, ft, active_mask, phases, envs)
+                out[block_start + s] = _next_sample(
+                    frac, ft, active_mask, phases, envs,
+                    held_gains_db, frame_gains,
+                )
 
         if block_idx % 50 == 0:
             active_count = int(active_mask.sum())
@@ -744,6 +771,7 @@ def synthesize_prepared(prepared: dict,
                      t_b, voiced_start, ft_start, active_count)
 
         prev_active_mask = active_mask.copy()
+        prev_frame_gains = frame_gains.copy()
 
     # Mix aperiodic noise (if enabled). Uses stft_raw/freqs_stft captured in prepare.
     if noise_mix_db > -120:
@@ -784,8 +812,12 @@ def synthesize_prepared(prepared: dict,
         else:
             log.info("Aperiodic noise requested but stft_raw missing from prepared dict")
 
-    log.info("Final mix: peak=%.4f RMS=%.4f",
+    log.info("Pre-limiter mix: peak=%.4f RMS=%.4f",
              float(np.abs(out).max()), float(np.sqrt(np.mean(out**2))))
+    if limit_output:
+        out = soft_limit(out)
+        log.info("Limited output: peak=%.4f RMS=%.4f",
+                 float(np.abs(out).max()), float(np.sqrt(np.mean(out**2))))
     return out
 
 
@@ -906,13 +938,14 @@ def main(argv=None):
 
     # Soft-clip + normalize to peak 0.95
     peak = float(np.abs(out).max())
-    if peak > 0.95:
-        log.warning("Peak %.3f > 0.95 — applying tanh soft-clip", peak)
-        out = np.tanh(out) * 0.95
+    if peak > OUTPUT_LIMIT:
+        log.warning("Peak %.3f > %.2f — applying Shaper soft limiter",
+                    peak, OUTPUT_LIMIT)
+        out = soft_limit(out)
     elif peak > 0:
-        out = out * (0.95 / peak)
-        log.info("Normalized: peak 0.95 (gain was %.1f dB)",
-                 20 * np.log10(0.95 / peak))
+        out = out * (OUTPUT_LIMIT / peak)
+        log.info("Normalized: peak %.2f (gain was %.1f dB)",
+                 OUTPUT_LIMIT, 20 * np.log10(OUTPUT_LIMIT / peak))
     else:
         log.error("Output is silent!")
         sys.exit(1)
