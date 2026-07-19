@@ -61,6 +61,10 @@ class VoiceParameterStore:
     control surfaces (MIDI/OSC/Web) set gain/pan/phase.
     """
 
+    # Negative IDs are reserved for native OSC envelope control. This keeps
+    # release ownership separate from MIDI and external beacon voice IDs.
+    _ENVELOPE_VOICE_ID_BASE = -10_000
+
     def __init__(self, on_change: Optional[Callable[[], None]] = None):
         self._lock = threading.RLock()
         self._voices: dict[int, VoiceParams] = {}
@@ -146,15 +150,57 @@ class VoiceParameterStore:
         with self._lock:
             self._base_f1 = max(config.F1_MIN, min(config.F1_MAX, float(f1)))
             self.f1 = self._base_f1 * self._vsrate
+            for harmonic_n, voice in self._voices.items():
+                if voice.voice_id == self._envelope_voice_id(harmonic_n):
+                    voice.freq = self.f1 * harmonic_n
         self._notify()
 
     def set_vsrate(self, rate: float) -> None:
         with self._lock:
             self._vsrate = max(0.1, min(4.0, float(rate)))
             self.f1 = self._base_f1 * self._vsrate
+            for harmonic_n, voice in self._voices.items():
+                if voice.voice_id == self._envelope_voice_id(harmonic_n):
+                    voice.freq = self.f1 * harmonic_n
         self._notify()
 
     # ─── Parameter control ────────────────────────────────────────────────
+
+    @classmethod
+    def _envelope_voice_id(cls, harmonic_n: int) -> int:
+        return cls._ENVELOPE_VOICE_ID_BASE - harmonic_n
+
+    def set_harmonic_envelope(self, harmonic_n: int, gain: float) -> None:
+        """Set a source-owned native envelope for one series harmonic.
+
+        A positive envelope owns and activates its harmonic at ``f1*n``. Zero
+        releases only the matching envelope voice, preserving a differently
+        owned MIDI or beacon voice on the same harmonic.
+        """
+
+        envelope_gain = max(0.0, min(1.0, float(gain)))
+        voice_id = self._envelope_voice_id(harmonic_n)
+        with self._lock:
+            self._ensure(harmonic_n)
+            voice = self._voices[harmonic_n]
+            if envelope_gain == 0.0:
+                if voice.voice_id == voice_id:
+                    voice.active = False
+                    voice.gain = 0.0
+                    if harmonic_n in self._active_history:
+                        self._active_history.remove(harmonic_n)
+            else:
+                voice.voice_id = voice_id
+                voice.freq = self.f1 * harmonic_n
+                voice.gain = envelope_gain
+                voice.active = True
+                if harmonic_n in self._active_history:
+                    self._active_history.remove(harmonic_n)
+                self._active_history.append(harmonic_n)
+                while len(self._active_history) > config.MAX_VOICES:
+                    oldest_n = self._active_history.pop(0)
+                    self._voices[oldest_n].active = False
+        self._notify()
 
     def set_gain(self, harmonic_n: int, gain: float) -> None:
         with self._lock:

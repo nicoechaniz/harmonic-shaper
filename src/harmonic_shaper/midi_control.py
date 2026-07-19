@@ -110,6 +110,7 @@ class NativeNoteHandler:
         mapping_mode: str = config.NATIVE_MIDI_MAPPING_MODE,
         momentary_start_midi: int = config.NATIVE_MIDI_MOMENTARY_START,
         toggle_start_midi: int = config.NATIVE_MIDI_TOGGLE_START,
+        panic_midi_note: int | None = config.NATIVE_MIDI_PANIC_NOTE,
     ) -> None:
         self._store = store
         self._anchor_midi = int(anchor_midi)
@@ -122,6 +123,11 @@ class NativeNoteHandler:
         self._mapping_mode = mapping_mode
         self._momentary_start_midi = int(momentary_start_midi)
         self._toggle_start_midi = int(toggle_start_midi)
+        self._panic_midi_note = (
+            int(panic_midi_note)
+            if panic_midi_note is not None and 0 <= int(panic_midi_note) <= 127
+            else None
+        )
         if self._mapping_mode == "sequential_banks":
             momentary_range = range(self._momentary_start_midi, self._momentary_start_midi + self._max_bands)
             toggle_range = range(self._toggle_start_midi, self._toggle_start_midi + self._max_bands)
@@ -188,6 +194,11 @@ class NativeNoteHandler:
             return None
 
         note = max(0, min(127, int(midi_note)))
+        if note == self._panic_midi_note:
+            log.info("Native MIDI panic key pressed: midi=%d", note)
+            self.panic()
+            self._store.panic()
+            return None
         with self._lock:
             mapping_label = "note"
             if self._mapping_mode == "sequential_banks":

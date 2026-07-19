@@ -137,6 +137,7 @@ class ShaperOSCReceiver:
     def _start_shaper_listener(self) -> None:
         dispatcher = osc_dispatcher.Dispatcher()
         dispatcher.map("/digital/harmonic/*/gain", self._on_gain)
+        dispatcher.map("/digital/harmonic/*/envelope", self._on_envelope)
         dispatcher.map("/digital/harmonic/*/pan", self._on_pan)
         dispatcher.map("/digital/harmonic/*/phase", self._on_phase)
         dispatcher.map("/digital/master", self._on_master)
@@ -168,6 +169,11 @@ class ShaperOSCReceiver:
         n = self._parse_n(addr)
         if n is not None:
             self._store.set_gain(n, float(value))
+
+    def _on_envelope(self, addr, value, *_) -> None:
+        n = self._parse_n(addr)
+        if n is not None:
+            self._store.set_harmonic_envelope(n, float(value))
 
     def _on_pan(self, addr, value, *_) -> None:
         n = self._parse_n(addr)

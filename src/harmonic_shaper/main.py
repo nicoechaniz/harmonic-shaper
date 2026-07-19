@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=config.NATIVE_MIDI_TOGGLE_START,
         help="First MIDI note of the sequential toggle bank",
     )
+    parser.add_argument(
+        "--native-midi-panic-note",
+        type=int,
+        default=config.NATIVE_MIDI_PANIC_NOTE,
+        help="Emergency panic MIDI note; use a value outside 0..127 to disable",
+    )
     parser.add_argument("--no-osc", action="store_true", help="Disable all OSC input")
     parser.add_argument("--no-api", action="store_true", help="Disable HTTP/WebSocket state API")
     parser.add_argument(
@@ -133,6 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         mapping_mode=args.native_midi_mode,
         momentary_start_midi=args.native_midi_momentary_start,
         toggle_start_midi=args.native_midi_toggle_start,
+        panic_midi_note=args.native_midi_panic_note,
     )
 
     audio = None if args.no_audio else AudioEngine(store, device=args.device or config.AUDIO_DEVICE)

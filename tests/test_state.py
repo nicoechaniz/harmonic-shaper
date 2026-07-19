@@ -22,6 +22,37 @@ def test_store_clamps_contract_parameters() -> None:
     assert store.get_master_gain() == 0.0
 
 
+def test_harmonic_envelope_owns_lifecycle_and_tracks_active_series() -> None:
+    store = VoiceParameterStore()
+    store.update_f1(50.0)
+
+    store.set_harmonic_envelope(3, 0.6)
+    voice = store.get_snapshot()[3]
+    assert voice.active is True
+    assert voice.gain == 0.6
+    assert voice.freq == 150.0
+
+    store.set_vsrate(1.5)
+    assert store.get_snapshot()[3].freq == 225.0
+    store.update_f1(40.0)
+    assert store.get_snapshot()[3].freq == 180.0
+
+    store.set_harmonic_envelope(3, 0.0)
+    assert 3 not in store.get_snapshot()
+
+
+def test_harmonic_envelope_release_preserves_different_voice_owner() -> None:
+    store = VoiceParameterStore()
+    store.set_harmonic_envelope(4, 0.5)
+    store.voice_on(4, voice_id=42, freq=161.6, gain=0.7)
+
+    store.set_harmonic_envelope(4, 0.0)
+    voice = store.get_snapshot()[4]
+    assert voice.active is True
+    assert voice.voice_id == 42
+    assert voice.gain == 0.7
+
+
 def test_store_thread_safety_smoke() -> None:
     store = VoiceParameterStore()
     # Exercise re-entrant reads from the state-change callback too.

@@ -324,6 +324,22 @@ class TestSequentialBanks:
         assert _active(store) == {}
         assert handler.held_notes == {}
 
+    def test_configured_panic_key_releases_all_active_native_voices(self) -> None:
+        store = VoiceParameterStore()
+        handler = NativeNoteHandler(
+            store,
+            momentary_start_midi=24,
+            toggle_start_midi=72,
+            panic_midi_note=108,
+        )
+        handler.note_on(24, 100)
+        handler.note_on(73, 100)
+        assert set(_active(store)) == {1, 2}
+
+        assert handler.note_on(108, 100) is None
+        assert _active(store) == {}
+        assert handler.held_notes == {}
+
     def test_overlapping_sequential_banks_are_rejected(self) -> None:
         with pytest.raises(ValueError, match="must not overlap"):
             NativeNoteHandler(

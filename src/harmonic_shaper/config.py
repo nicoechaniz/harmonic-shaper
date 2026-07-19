@@ -26,6 +26,9 @@ NATIVE_MIDI_MAPPING_MODE = "sequential_banks"
 NATIVE_MIDI_MOMENTARY_START = 24
 NATIVE_MIDI_TOGGLE_START = 72
 NATIVE_MIDI_BANK_SIZE = N_BANDS
+# A controller-specific emergency key may live above both playable banks.
+# Set outside 0..127 to disable it for a different controller.
+NATIVE_MIDI_PANIC_NOTE = 108
 # Anchor MIDI note used only by the legacy hybrid mapper (C1 = 24).
 DEFAULT_ANCHOR_MIDI = 24
 # Default standalone mode: play generic MIDI keyboards without NH beacon.

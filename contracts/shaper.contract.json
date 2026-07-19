@@ -16,7 +16,7 @@
         "bind": "0.0.0.0",
         "namespace": "/digital",
         "config_key": "SHAPER_OSC_PORT",
-        "description": "Direct Shaper control: /digital/harmonic/*/gain|pan|phase, /digital/master, /digital/panic."
+        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/panic."
       },
       {
         "role": "nh_broadcast_slave",
@@ -87,6 +87,35 @@
       ],
       "lag_ms": 0.0,
       "smoothing": "Immediate store write; audio envelope (attack_s / release_s) applies only to voice on/off amplitude, not to this gain set.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "harmonic_envelope",
+      "address_pattern": "/digital/harmonic/{N}/envelope",
+      "parameters": {
+        "N": {
+          "type": "int32",
+          "bounds": [
+            1,
+            32
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "gain",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "Positive values activate and control an owned voice at f1*N; 0 releases only that native envelope voice."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write; the audio envelope applies to the voice lifecycle. The controlled voice frequency tracks f1*N when f1 or vsrate changes.",
       "read": true,
       "write": true,
       "listener_port": 9002
