@@ -7,13 +7,17 @@ from types import SimpleNamespace
 import pytest
 
 from harmonic_shaper import config
-from harmonic_shaper.harmonic_mapping import map_midi_note, velocity_to_gain
+from harmonic_shaper.harmonic_mapping import (
+    map_midi_note,
+    map_sequential_harmonic,
+    velocity_to_gain,
+)
 from harmonic_shaper.main import build_parser
 from harmonic_shaper.midi_control import NativeNoteHandler
-from harmonic_shaper.state import VoiceParameterStore
+from harmonic_shaper.state import VoiceParameterStore, VoiceParams
 
 
-def _active(store: VoiceParameterStore) -> dict[int, object]:
+def _active(store: VoiceParameterStore) -> dict[int, VoiceParams]:
     return store.get_snapshot()
 
 
@@ -42,7 +46,9 @@ class TestNativeNoteLifecycle:
     def test_note_on_activates_mapped_voice(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24, enabled=True)
+        handler = NativeNoteHandler(
+            store, anchor_midi=24, enabled=True, mapping_mode="legacy_hybrid"
+        )
 
         vid = handler.note_on(60, 100)  # C4 → n=8, playable 323.2
         assert vid is not None
@@ -56,7 +62,7 @@ class TestNativeNoteLifecycle:
     def test_note_off_releases_originating_voice(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
 
         vid = handler.note_on(60, 80)
         assert _active(store)
@@ -68,7 +74,7 @@ class TestNativeNoteLifecycle:
     def test_zero_velocity_is_note_off(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
 
         handler.note_on(64, 90)
         assert _active(store)
@@ -84,6 +90,7 @@ class TestNativeNoteLifecycle:
             anchor_midi=24,
             velocity_gain_min=0.1,
             velocity_gain_max=0.9,
+            mapping_mode="legacy_hybrid",
         )
         handler.note_on(48, 127)
         g = store.get_snapshot()[4].gain  # C3 → n=4
@@ -96,7 +103,7 @@ class TestNativeNoteLifecycle:
     def test_overlapping_different_notes(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
 
         v1 = handler.note_on(60, 100)  # C4 → band 8
         v2 = handler.note_on(64, 100)  # E4 → band 5 (prototype)
@@ -128,7 +135,7 @@ class TestNativeNoteLifecycle:
     def test_overlapping_same_note_retrigger(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
 
         v1 = handler.note_on(60, 50)
         v2 = handler.note_on(60, 100)  # re-trigger
@@ -145,7 +152,7 @@ class TestNativeNoteLifecycle:
         """C2 (n=2) and C3 (n=4) must not release each other."""
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
 
         v_low = handler.note_on(36, 80)
         v_high = handler.note_on(48, 90)
@@ -180,7 +187,9 @@ class TestNativeNoteLifecycle:
 
         store = VoiceParameterStore()
         store.update_f1(f1)
-        handler = NativeNoteHandler(store, anchor_midi=anchor, enabled=True)
+        handler = NativeNoteHandler(
+            store, anchor_midi=anchor, enabled=True, mapping_mode="legacy_hybrid"
+        )
 
         v0 = handler.note_on(0, 100)
         assert v0 == 1_000_000
@@ -214,14 +223,14 @@ class TestNativeNoteLifecycle:
 
     def test_disabled_handler_ignores_notes(self) -> None:
         store = VoiceParameterStore()
-        handler = NativeNoteHandler(store, enabled=False)
+        handler = NativeNoteHandler(store, enabled=False, mapping_mode="legacy_hybrid")
         assert handler.note_on(60, 100) is None
         assert _active(store) == {}
 
     def test_handle_message_note_on_off(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
         handler.handle_message(SimpleNamespace(type="note_on", note=36, velocity=100))
         assert 2 in _active(store)
         handler.handle_message(SimpleNamespace(type="note_off", note=36, velocity=0))
@@ -230,7 +239,7 @@ class TestNativeNoteLifecycle:
     def test_panic_clears_held(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
         handler.note_on(36, 100)
         handler.note_on(48, 100)
         handler.panic()
@@ -240,7 +249,7 @@ class TestNativeNoteLifecycle:
     def test_f1_from_store_live(self) -> None:
         store = VoiceParameterStore()
         store.update_f1(40.40)
-        handler = NativeNoteHandler(store, anchor_midi=24)
+        handler = NativeNoteHandler(store, anchor_midi=24, mapping_mode="legacy_hybrid")
         expected_a = map_midi_note(24, f1=40.40, anchor_midi=24)
         handler.note_on(24, 100)
         assert store.get_snapshot()[expected_a.store_band()].freq == pytest.approx(
@@ -256,6 +265,72 @@ class TestNativeNoteLifecycle:
         assert expected_b.frequency_hz != expected_a.frequency_hz
 
 
+class TestSequentialBanks:
+    def test_direct_series_mapper_has_no_tempered_adaptation(self) -> None:
+        mapping = map_sequential_harmonic(31, f1=40.4, bank_start_midi=24, max_bands=32)
+        assert mapping is not None
+        assert mapping.harmonic_n == 8
+        assert mapping.frequency_hz == pytest.approx(323.2)
+        assert mapping.beacon_freq_hz == pytest.approx(323.2)
+        assert mapping.source == "sequential"
+        assert map_sequential_harmonic(56, bank_start_midi=24, max_bands=32) is None
+
+    def test_momentary_bank_maps_adjacent_keys_to_adjacent_partials(self) -> None:
+        store = VoiceParameterStore()
+        store.update_f1(40.4)
+        handler = NativeNoteHandler(store, momentary_start_midi=24, toggle_start_midi=72)
+
+        first = handler.note_on(24, 100)
+        second = handler.note_on(25, 100)
+        snapshot = _active(store)
+        assert first is not None and second is not None
+        assert snapshot[1].freq == pytest.approx(40.4)
+        assert snapshot[2].freq == pytest.approx(80.8)
+
+        assert handler.note_off(24) == first
+        assert 1 not in _active(store)
+        assert 2 in _active(store)
+
+    def test_toggle_bank_ignores_key_release_and_second_press_releases(self) -> None:
+        store = VoiceParameterStore()
+        store.update_f1(40.4)
+        handler = NativeNoteHandler(store, momentary_start_midi=24, toggle_start_midi=72)
+
+        voice_id = handler.note_on(72, 100)
+        assert voice_id is not None
+        assert _active(store)[1].active is True
+        assert _active(store)[1].freq == pytest.approx(40.4)
+        assert handler.note_off(72) is None
+        assert _active(store)[1].active is True
+
+        assert handler.note_on(72, 100) == voice_id
+        assert _active(store) == {}
+        assert handler.held_notes == {}
+
+    def test_outside_configured_banks_is_ignored(self) -> None:
+        store = VoiceParameterStore()
+        handler = NativeNoteHandler(store, momentary_start_midi=24, toggle_start_midi=72)
+        assert handler.note_on(60, 100) is None
+        assert handler.note_off(60) is None
+        assert _active(store) == {}
+
+    def test_panic_releases_momentary_and_toggle_voices(self) -> None:
+        store = VoiceParameterStore()
+        handler = NativeNoteHandler(store, momentary_start_midi=24, toggle_start_midi=72)
+        handler.note_on(24, 100)
+        handler.note_on(73, 100)
+        assert set(_active(store)) == {1, 2}
+        handler.panic()
+        assert _active(store) == {}
+        assert handler.held_notes == {}
+
+    def test_overlapping_sequential_banks_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must not overlap"):
+            NativeNoteHandler(
+                VoiceParameterStore(), momentary_start_midi=24, toggle_start_midi=40
+            )
+
+
 class TestHeadlessProbe:
     """Feed fake MIDI through the native path; assert store snapshots.
 
@@ -269,6 +344,7 @@ class TestHeadlessProbe:
             store,
             anchor_midi=config.DEFAULT_ANCHOR_MIDI,
             enabled=True,
+            mapping_mode="legacy_hybrid",
         )
 
         report: list[str] = []

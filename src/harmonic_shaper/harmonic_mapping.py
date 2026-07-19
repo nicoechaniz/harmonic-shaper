@@ -172,6 +172,37 @@ def beacon_frequency(f1: float, n: int) -> float:
     return float(f1) * int(n)
 
 
+def map_sequential_harmonic(
+    midi_note: int,
+    f1: float = DEFAULT_F1_HZ,
+    bank_start_midi: int = DEFAULT_ANCHOR_MIDI,
+    *,
+    max_bands: int = 32,
+) -> NoteMapping | None:
+    """Map adjacent keys in one MIDI bank directly to ``n=1..max_bands``.
+
+    This is the playable-series mapper: the first key in the bank is the
+    fundamental, each following chromatic key selects the next integer partial,
+    and pitch is exactly ``f1 * n``. It intentionally makes no 12-TET or octave
+    adaptation.
+    """
+    note = max(0, min(127, int(midi_note)))
+    n = note - int(bank_start_midi) + 1
+    if not 1 <= n <= int(max_bands):
+        return None
+    f1_v = float(f1)
+    frequency = beacon_frequency(f1_v, n)
+    return NoteMapping(
+        midi_note=note,
+        harmonic_n=n,
+        frequency_hz=frequency,
+        beacon_freq_hz=frequency,
+        source="sequential",
+        anchor_midi=int(bank_start_midi),
+        f1=f1_v,
+    )
+
+
 def playable_frequency(f1: float, n: int, target_note: int) -> float:
     """Octave-aware playable frequency for a pressed key.
 

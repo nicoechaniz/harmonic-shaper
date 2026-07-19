@@ -65,7 +65,11 @@ except ImportError:
     HAS_MIDO = False
     mido = None
 
-from .harmonic_mapping import map_midi_note, velocity_to_gain
+from .harmonic_mapping import (
+    map_midi_note,
+    map_sequential_harmonic,
+    velocity_to_gain,
+)
 from .state import VoiceParameterStore
 from . import config
 
@@ -84,12 +88,11 @@ class NativeNoteHandler:
 
     Policy
     ------
-    - Each held MIDI note owns exactly one ``voice_id``.
-    - Note-off and note-on with velocity 0 release only that note's voice.
-    - Concurrent different notes never release each other via note-off.
-    - Same-note re-trigger releases the previous voice then starts a new one.
-    - Frequency uses live ``store.f1`` so OSC/API f₁ updates apply.
-    - Band index is ``NoteMapping.store_band(N_BANDS)`` (lattice 1..32).
+    - ``sequential_banks`` maps adjacent keys to integer partials and exact
+      ``f1*n`` frequencies. One bank is momentary; another is toggle/sustain.
+    - ``legacy_hybrid`` retains the prior NaturalHarmony-derived mapper.
+    - Each active MIDI note owns exactly one ``voice_id`` and never releases a
+      different note's voice.
     """
 
     # Keep well clear of Launchpad/Minilab local counters (start at 1).
@@ -103,7 +106,10 @@ class NativeNoteHandler:
         enabled: bool = config.NATIVE_MIDI_SOURCE_ENABLED,
         velocity_gain_min: float = config.NATIVE_MIDI_VELOCITY_GAIN_MIN,
         velocity_gain_max: float = config.NATIVE_MIDI_VELOCITY_GAIN_MAX,
-        max_bands: int = config.N_BANDS,
+        max_bands: int = config.NATIVE_MIDI_BANK_SIZE,
+        mapping_mode: str = config.NATIVE_MIDI_MAPPING_MODE,
+        momentary_start_midi: int = config.NATIVE_MIDI_MOMENTARY_START,
+        toggle_start_midi: int = config.NATIVE_MIDI_TOGGLE_START,
     ) -> None:
         self._store = store
         self._anchor_midi = int(anchor_midi)
@@ -111,9 +117,20 @@ class NativeNoteHandler:
         self._vel_min = float(velocity_gain_min)
         self._vel_max = float(velocity_gain_max)
         self._max_bands = int(max_bands)
+        if mapping_mode not in {"sequential_banks", "legacy_hybrid"}:
+            raise ValueError(f"Unsupported native MIDI mapping mode: {mapping_mode}")
+        self._mapping_mode = mapping_mode
+        self._momentary_start_midi = int(momentary_start_midi)
+        self._toggle_start_midi = int(toggle_start_midi)
+        if self._mapping_mode == "sequential_banks":
+            momentary_range = range(self._momentary_start_midi, self._momentary_start_midi + self._max_bands)
+            toggle_range = range(self._toggle_start_midi, self._toggle_start_midi + self._max_bands)
+            if set(momentary_range) & set(toggle_range):
+                raise ValueError("Native MIDI momentary and toggle banks must not overlap")
         self._lock = threading.RLock()
-        # midi_note -> voice_id (originating voice for that key)
+        # midi_note -> voice_id, partitioned so toggle note-offs are ignored.
         self._held: dict[int, int] = {}
+        self._toggles: dict[int, int] = {}
         self._next_voice_id = self._VOICE_ID_BASE
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -140,7 +157,22 @@ class NativeNoteHandler:
     def held_notes(self) -> dict[int, int]:
         """Snapshot of midi_note → voice_id for active native notes."""
         with self._lock:
-            return dict(self._held)
+            return {**self._held, **self._toggles}
+
+    @property
+    def mapping_mode(self) -> str:
+        return self._mapping_mode
+
+    def _sequential_mapping(self, note: int):
+        if self._momentary_start_midi <= note < self._momentary_start_midi + self._max_bands:
+            return "momentary", map_sequential_harmonic(
+                note, self._store.f1, self._momentary_start_midi, max_bands=self._max_bands
+            )
+        if self._toggle_start_midi <= note < self._toggle_start_midi + self._max_bands:
+            return "toggle", map_sequential_harmonic(
+                note, self._store.f1, self._toggle_start_midi, max_bands=self._max_bands
+            )
+        return None, None
 
     # ── Note lifecycle ───────────────────────────────────────────────────
 
@@ -157,16 +189,30 @@ class NativeNoteHandler:
 
         note = max(0, min(127, int(midi_note)))
         with self._lock:
+            mapping_label = "note"
+            if self._mapping_mode == "sequential_banks":
+                bank, mapping = self._sequential_mapping(note)
+                if mapping is None:
+                    log.debug("Native note ignored outside configured banks: midi=%d", note)
+                    return None
+                if bank == "toggle" and note in self._toggles:
+                    vid = self._toggles.pop(note)
+                    self._store.voice_off(vid)
+                    log.debug("Native toggle OFF midi=%d n=%d vid=%d", note, mapping.harmonic_n, vid)
+                    return vid
+                owners = self._toggles if bank == "toggle" else self._held
+                mapping_label = bank
+            else:
+                mapping = map_midi_note(
+                    note,
+                    f1=self._store.f1,
+                    anchor_midi=self._anchor_midi,
+                )
+                owners = self._held
             # Re-trigger: release previous voice for this key first
-            prev = self._held.pop(note, None)
+            prev = owners.pop(note, None)
             if prev is not None:
                 self._store.voice_off(prev)
-
-            mapping = map_midi_note(
-                note,
-                f1=self._store.f1,
-                anchor_midi=self._anchor_midi,
-            )
             band = mapping.store_band(self._max_bands)
             gain = velocity_to_gain(
                 velocity,
@@ -175,10 +221,11 @@ class NativeNoteHandler:
             )
             vid = self._next_voice_id
             self._next_voice_id += 1
-            self._held[note] = vid
+            owners[note] = vid
             self._store.voice_on(band, vid, mapping.frequency_hz, gain=gain)
             log.debug(
-                "Native note ON  midi=%d n=%d band=%d freq=%.3fHz gain=%.3f vid=%d src=%s",
+                "Native %s ON midi=%d n=%d band=%d freq=%.3fHz gain=%.3f vid=%d src=%s",
+                mapping_label,
                 note,
                 mapping.harmonic_n,
                 band,
@@ -193,6 +240,12 @@ class NativeNoteHandler:
         """Release the voice that originated from this MIDI note, if any."""
         note = max(0, min(127, int(midi_note)))
         with self._lock:
+            if self._mapping_mode == "sequential_banks":
+                bank, _ = self._sequential_mapping(note)
+                if bank == "toggle":
+                    return None
+                if bank is None:
+                    return None
             vid = self._held.pop(note, None)
             if vid is None:
                 return None
@@ -215,9 +268,10 @@ class NativeNoteHandler:
             self._release_all_locked()
 
     def _release_all_locked(self) -> None:
-        for vid in list(self._held.values()):
+        for vid in [*self._held.values(), *self._toggles.values()]:
             self._store.voice_off(vid)
         self._held.clear()
+        self._toggles.clear()
 
 
 class NativeMidiNoteSource:

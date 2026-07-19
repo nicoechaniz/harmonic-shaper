@@ -31,13 +31,18 @@ The default process starts the audio engine, native OSC listener, MIDI
 controllers when present (Launchpad, Minilab3, and a **native keyboard note
 source**), and the FastAPI state service.
 
-Standalone mode maps generic MIDI keyboard notes to harmonic voices using the
-natural-harmonic series (`f1` + anchor MIDI note) — no NaturalHarmony beacon is
+Standalone mode defaults to sequential natural-harmonic banks: adjacent keys
+select `n=1..32` at exact `f1*n` frequencies. The lower configured bank is
+momentary; the upper bank is toggle/sustain. No 12-TET pitch adaptation is
+applied. See [Native MIDI Harmonic Banks](docs/NATIVE_MIDI_HARMONIC_BANKS.md)
+for configuration and controller calibration. No NaturalHarmony beacon is
 required. Useful flags:
 
 ```bash
 python -m harmonic_shaper --slave            # opt in to NH /beacon/* broadcasts
 python -m harmonic_shaper --f1 40.40 --anchor 24
+python -m harmonic_shaper --native-midi-momentary-start 24 --native-midi-toggle-start 72
+python -m harmonic_shaper --native-midi-mode legacy_hybrid
 python -m harmonic_shaper --no-native-midi   # keyboards off; pads/CC still on
 python -m harmonic_shaper --no-audio         # headless control/API process
 python -m harmonic_shaper --no-midi

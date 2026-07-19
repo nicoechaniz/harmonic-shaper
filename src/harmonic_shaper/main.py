@@ -51,6 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=config.DEFAULT_ANCHOR_MIDI,
         help=f"Anchor MIDI note for f1 (default {config.DEFAULT_ANCHOR_MIDI} = C1)",
     )
+    parser.add_argument(
+        "--native-midi-mode",
+        choices=("sequential_banks", "legacy_hybrid"),
+        default=config.NATIVE_MIDI_MAPPING_MODE,
+        help="Keyboard mapping mode (default: sequential harmonic banks)",
+    )
+    parser.add_argument(
+        "--native-midi-momentary-start",
+        type=int,
+        default=config.NATIVE_MIDI_MOMENTARY_START,
+        help="First MIDI note of the sequential momentary bank",
+    )
+    parser.add_argument(
+        "--native-midi-toggle-start",
+        type=int,
+        default=config.NATIVE_MIDI_TOGGLE_START,
+        help="First MIDI note of the sequential toggle bank",
+    )
     parser.add_argument("--no-osc", action="store_true", help="Disable all OSC input")
     parser.add_argument("--no-api", action="store_true", help="Disable HTTP/WebSocket state API")
     parser.add_argument(
@@ -112,6 +130,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         store,
         anchor_midi=int(args.anchor),
         enabled=native_enabled,
+        mapping_mode=args.native_midi_mode,
+        momentary_start_midi=args.native_midi_momentary_start,
+        toggle_start_midi=args.native_midi_toggle_start,
     )
 
     audio = None if args.no_audio else AudioEngine(store, device=args.device or config.AUDIO_DEVICE)
@@ -152,12 +173,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGHUP, _request_shutdown)
 
     log.info(
-        "Starting Harmonic Shaper: f1=%.2f Hz, anchor_midi=%d, bands=%d, polyphony=%d, native_midi=%s",
+        "Starting Harmonic Shaper: f1=%.2f Hz, anchor_midi=%d, bands=%d, polyphony=%d, native_midi=%s mode=%s",
         store.f1,
         native_handler.anchor_midi,
         config.N_BANDS,
         config.MAX_VOICES,
         native_enabled,
+        native_handler.mapping_mode,
     )
 
     try:
@@ -207,7 +229,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 log.info("Slave OSC off (pass --slave for optional /beacon/*)")
         if native_enabled:
             log.info(
-                "Native MIDI note source ON (anchor=%d, f1=%.2f Hz)",
+                "Native MIDI note source ON (mode=%s, anchor=%d, f1=%.2f Hz)",
+                native_handler.mapping_mode,
                 native_handler.anchor_midi,
                 store.f1,
             )
