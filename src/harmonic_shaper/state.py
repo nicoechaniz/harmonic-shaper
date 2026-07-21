@@ -17,6 +17,68 @@ from typing import Callable, Optional
 from . import config
 
 
+# Envelope profiles applied at voice_on / scheduled voice_off.
+# ``pad`` keeps the existing linear AR defaults (zero regression).
+ENVELOPE_PROFILES: dict[str, tuple[float, float]] = {
+    "pad": (config.DEFAULT_VOICE_ATTACK_S, config.DEFAULT_VOICE_RELEASE_S),
+    "pluck": (0.02, 0.25),
+    "perc": (0.001, 0.08),
+}
+
+# Density fill 0..1 → subdivision factor, quantized for musical steps.
+_ARP_DENSITY_SUBDIVS: tuple[int, ...] = (1, 2, 3, 4, 6, 8)
+
+# Arpeggiator voice_id band: -20000 - H*1000 - n  (H hand, n harmonic 1..32).
+_ARP_VOICE_ID_BASE = -20_000
+_ARP_HANDS = (0,)  # H=0 first; H=1.. later
+_ARP_RATE_EPS = 0.01
+_ARP_DIR_EPS = 1e-6
+
+
+def arp_voice_id(hand: int, harmonic_n: int) -> int:
+    """Dedicated voice_id for arpeggiator hand H, partial n."""
+    return _ARP_VOICE_ID_BASE - int(hand) * 1000 - int(harmonic_n)
+
+
+def density_to_subdiv(fill: float) -> int:
+    """Map density fill 0..1 to a quantized subdivision in {1,2,3,4,6,8}."""
+    fill = max(0.0, min(1.0, float(fill)))
+    idx = int(round(fill * (len(_ARP_DENSITY_SUBDIVS) - 1)))
+    return _ARP_DENSITY_SUBDIVS[idx]
+
+
+def _default_arp_state(hand: int = 0) -> dict:
+    """Fresh per-hand arpeggiator runtime + target/settled params."""
+    del hand  # reserved for multi-hand defaults later
+    return {
+        "enabled": False,
+        "cursor_n": 1,
+        "step_phase": 0.0,       # 0..1 within one step
+        "last_dir_sign": 1.0,    # last non-zero direction sign
+        # targets (OSC/REST write surface)
+        "target_rate": 0.0,
+        "target_dir": 0.0,
+        "target_density": 0.0,
+        "target_lo": 1.0,
+        "target_hi": float(config.N_BANDS),
+        "target_gate": 0.5,
+        "target_gain": 0.6,
+        # settled (eased toward targets over settle_beats)
+        "settled_rate": 0.0,
+        "settled_dir": 0.0,
+        "settled_density": 0.0,
+        "settled_lo": 1.0,
+        "settled_hi": float(config.N_BANDS),
+        "settled_gate": 0.5,
+        "settled_gain": 0.6,
+        # scheduled voice_off: list of (remaining_s, voice_id)
+        "pending_offs": [],
+        # rate≈0 sustain bookkeeping
+        "sustain_voice_id": None,
+        "sustain_n": None,
+    }
+
+
 @dataclass
 class VoiceParams:
     """Parameters for a single Shaper voice (one pure sine)."""
@@ -33,9 +95,21 @@ class VoiceParams:
     lfo_phase: float = config.DEFAULT_LFO_PHASE
     active: bool = False
     voice_id: Optional[int] = None
+    # Named AR preset: "pad" (default), "pluck" (arp), "perc" (later).
+    envelope_profile: str = "pad"
 
     def copy(self) -> "VoiceParams":
         return copy(self)
+
+    def apply_envelope_profile(self, profile: str = None) -> None:
+        """Set attack_s/release_s from a named profile (pad/pluck/perc)."""
+        name = profile if profile is not None else self.envelope_profile
+        if name not in ENVELOPE_PROFILES:
+            name = "pad"
+        self.envelope_profile = name
+        attack, release = ENVELOPE_PROFILES[name]
+        self.attack_s = attack
+        self.release_s = release
 
     def to_dict(self) -> dict:
         return {
@@ -51,6 +125,7 @@ class VoiceParams:
             "lfo_pan": self.lfo_pan,
             "lfo_phase": self.lfo_phase,
             "active": self.active,
+            "envelope_profile": self.envelope_profile,
         }
 
 
@@ -95,6 +170,10 @@ class VoiceParameterStore:
         self._settle_beats: float = 1.0
         self._generator_enable: bool = True
         self._beat_phase: float = 0.0  # 0..1, advances at bpm/60 Hz
+        # Arpeggiator per hand H (MVP: H=0). Settled params ease over settle_beats.
+        self._arp_state: dict[int, dict] = {
+            h: _default_arp_state(h) for h in _ARP_HANDS
+        }
         self._on_change = on_change
         self._panic_callback: Optional[Callable[[], None]] = None
 
@@ -116,7 +195,14 @@ class VoiceParameterStore:
 
     # ─── Beacon-driven lifecycle ──────────────────────────────────────────
 
-    def voice_on(self, harmonic_n: int, voice_id: int, freq: float, gain: float = None) -> None:
+    def voice_on(
+        self,
+        harmonic_n: int,
+        voice_id: int,
+        freq: float,
+        gain: float = None,
+        envelope_profile: Optional[str] = None,
+    ) -> None:
         with self._lock:
             self._ensure(harmonic_n)
             v = self._voices[harmonic_n]
@@ -127,6 +213,8 @@ class VoiceParameterStore:
                 v.gain = max(0.0, min(1.0, float(gain)))
             else:
                 v.gain = config.DEFAULT_VOICE_GAIN
+            if envelope_profile is not None:
+                v.apply_envelope_profile(envelope_profile)
 
             if harmonic_n in self._active_history:
                 self._active_history.remove(harmonic_n)
@@ -139,9 +227,17 @@ class VoiceParameterStore:
         self._notify()
 
     def voice_off(self, voice_id: int) -> None:
+        """Deactivate the voice bound to ``voice_id``.
+
+        If the voice has a named envelope profile, re-apply its release time so
+        the audio callback ramps out with the profile's release (pluck/perc).
+        """
         with self._lock:
             for n, v in self._voices.items():
                 if v.voice_id == voice_id:
+                    # Re-apply profile so release_s matches the note's envelope.
+                    if v.envelope_profile in ENVELOPE_PROFILES:
+                        v.apply_envelope_profile(v.envelope_profile)
                     v.active = False
                     if n in self._active_history:
                         self._active_history.remove(n)
@@ -328,6 +424,315 @@ class VoiceParameterStore:
     def get_generator_enable(self) -> bool:
         with self._lock:
             return self._generator_enable
+
+    # ─── Arpeggiator (H hands; MVP H=0) ────────────────────────────────
+
+    def _ensure_arp(self, hand: int) -> dict:
+        h = int(hand)
+        if h not in self._arp_state:
+            self._arp_state[h] = _default_arp_state(h)
+        return self._arp_state[h]
+
+    def get_arp_state(self, hand: int = 0) -> dict:
+        """Copy of arp runtime state for tests / diagnostics (not audio hot path)."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            out = dict(st)
+            out["pending_offs"] = list(st["pending_offs"])
+            return out
+
+    def set_arp_enable(self, hand: int, enabled) -> None:
+        """Enable/disable arpeggiator hand H. Accepts bool or int 0|1."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            if isinstance(enabled, bool):
+                st["enabled"] = enabled
+            else:
+                st["enabled"] = bool(int(enabled))
+            if not st["enabled"]:
+                self._arp_release_sustain(st)
+        self._notify()
+
+    def set_arp_rate(self, hand: int, steps_per_beat: float) -> None:
+        """Steps per beat 0..8. 0 ≈ sustain single note at window center."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_rate"] = max(0.0, min(8.0, float(steps_per_beat)))
+        self._notify()
+
+    def set_arp_direction(self, hand: int, direction: float) -> None:
+        """Direction -1..1 (down/up). Near 0 keeps last non-zero sign for stepping."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_dir"] = max(-1.0, min(1.0, float(direction)))
+        self._notify()
+
+    def set_arp_density(self, hand: int, fill: float) -> None:
+        """Fill 0..1 → quantized subdivision {1,2,3,4,6,8}."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_density"] = max(0.0, min(1.0, float(fill)))
+        self._notify()
+
+    def set_arp_register_lo(self, hand: int, n: int) -> None:
+        """Lower edge of the partial window (1..32)."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_lo"] = float(max(1, min(config.N_BANDS, int(n))))
+        self._notify()
+
+    def set_arp_register_hi(self, hand: int, n: int) -> None:
+        """Upper edge of the partial window (1..32), later clamped by ceiling."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_hi"] = float(max(1, min(config.N_BANDS, int(n))))
+        self._notify()
+
+    def set_arp_gate(self, hand: int, frac: float) -> None:
+        """Gate fraction 0..1 of step period (staccato↔legato)."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_gate"] = max(0.0, min(1.0, float(frac)))
+        self._notify()
+
+    def set_arp_gain(self, hand: int, gain: float) -> None:
+        """Arpeggiator hand gain 0..1."""
+        with self._lock:
+            st = self._ensure_arp(hand)
+            st["target_gain"] = max(0.0, min(1.0, float(gain)))
+        self._notify()
+
+    def _arp_release_sustain(self, st: dict) -> None:
+        """Internal: release sustain voice if held (caller holds lock)."""
+        vid = st.get("sustain_voice_id")
+        if vid is not None:
+            # Inline voice_off without re-acquiring / notify spam mid-callback.
+            for n, v in self._voices.items():
+                if v.voice_id == vid:
+                    if v.envelope_profile in ENVELOPE_PROFILES:
+                        v.apply_envelope_profile(v.envelope_profile)
+                    v.active = False
+                    if n in self._active_history:
+                        self._active_history.remove(n)
+                    break
+            st["sustain_voice_id"] = None
+            st["sustain_n"] = None
+
+    def _arp_voice_on(
+        self,
+        hand: int,
+        harmonic_n: int,
+        gain: float,
+        envelope_profile: str = "pluck",
+    ) -> int:
+        """Internal voice_on for arp band (caller holds lock). Returns voice_id."""
+        n = int(harmonic_n)
+        vid = arp_voice_id(hand, n)
+        freq = self.f1 * n
+        self._ensure(n)
+        v = self._voices[n]
+        v.voice_id = vid
+        v.freq = freq
+        v.active = True
+        v.gain = max(0.0, min(1.0, float(gain)))
+        v.apply_envelope_profile(envelope_profile)
+        if n in self._active_history:
+            self._active_history.remove(n)
+        self._active_history.append(n)
+        while len(self._active_history) > config.MAX_VOICES:
+            oldest_n = self._active_history.pop(0)
+            self._voices[oldest_n].active = False
+        return vid
+
+    def _arp_voice_off(self, voice_id: int) -> None:
+        """Internal voice_off (caller holds lock)."""
+        for n, v in self._voices.items():
+            if v.voice_id == voice_id:
+                if v.envelope_profile in ENVELOPE_PROFILES:
+                    v.apply_envelope_profile(v.envelope_profile)
+                v.active = False
+                if n in self._active_history:
+                    self._active_history.remove(n)
+                break
+
+    def _arp_effective_window(self, st: dict) -> tuple[int, int]:
+        """Effective partial window [lo, hi] ∩ [1, ceiling]."""
+        ceiling = self._partial_ceiling
+        lo = int(round(st["settled_lo"]))
+        hi = int(round(st["settled_hi"]))
+        lo = max(1, min(ceiling, lo))
+        hi = max(1, min(ceiling, hi))
+        if lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
+    @staticmethod
+    def _arp_dir_sign(direction: float, last_sign: float) -> float:
+        if direction > _ARP_DIR_EPS:
+            return 1.0
+        if direction < -_ARP_DIR_EPS:
+            return -1.0
+        return 1.0 if last_sign >= 0 else -1.0
+
+    def advance_arp(self, dt: float) -> None:
+        """Advance all enabled arpeggiators by ``dt`` seconds (audio callback).
+
+        Eases target params with ``eased_target`` over ``settle_beats``, then
+        either sustains the window-center partial (rate≈0) or steps the cursor
+        at ``rate * density_subdiv`` steps per beat.
+        """
+        dt = float(dt)
+        if dt <= 0.0:
+            return
+        with self._lock:
+            if not self._generator_enable:
+                # Still tick scheduled offs so notes don't hang forever.
+                for st in self._arp_state.values():
+                    self._arp_tick_pending_offs(st, dt)
+                return
+
+            bpm = self._clock_bpm
+            settle = self._settle_beats
+            delta_beats = (bpm / 60.0) * dt
+
+            for hand, st in list(self._arp_state.items()):
+                self._arp_ease_params(st, delta_beats, settle)
+                self._arp_tick_pending_offs(st, dt)
+                if not st["enabled"]:
+                    continue
+                self._arp_run_hand(hand, st, dt, bpm)
+
+    def _arp_ease_params(self, st: dict, delta_beats: float, settle: float) -> None:
+        for key in (
+            "rate", "dir", "density", "lo", "hi", "gate", "gain",
+        ):
+            tkey = f"target_{key}"
+            skey = f"settled_{key}"
+            st[skey] = self.eased_target(st[skey], st[tkey], delta_beats, settle)
+
+    def _arp_tick_pending_offs(self, st: dict, dt: float) -> None:
+        remaining: list[tuple[float, int]] = []
+        for t_left, vid in st["pending_offs"]:
+            t_left -= dt
+            if t_left <= 0.0:
+                self._arp_voice_off(vid)
+            else:
+                remaining.append((t_left, vid))
+        st["pending_offs"] = remaining
+
+    def _arp_run_hand(self, hand: int, st: dict, dt: float, bpm: float) -> None:
+        lo, hi = self._arp_effective_window(st)
+        window_center = int(round((lo + hi) / 2.0))
+        rate = st["settled_rate"]
+        direction = st["settled_dir"]
+        density = st["settled_density"]
+        gate = max(0.0, min(1.0, st["settled_gate"]))
+        gain = st["settled_gain"]
+
+        new_sign = self._arp_dir_sign(direction, st["last_dir_sign"])
+        prev_sign = st["last_dir_sign"]
+        # Direction zero-cross: non-zero → opposite non-zero triggers immediately.
+        dir_crossed = (
+            abs(direction) > _ARP_DIR_EPS
+            and prev_sign != 0.0
+            and new_sign != 0.0
+            and (prev_sign * new_sign) < 0.0
+        )
+        if abs(direction) > _ARP_DIR_EPS:
+            st["last_dir_sign"] = new_sign
+
+        # rate≈0 → sustain single note at window center
+        if abs(rate) < _ARP_RATE_EPS:
+            st["step_phase"] = 0.0
+            st["cursor_n"] = window_center
+            if st["sustain_n"] != window_center or st["sustain_voice_id"] is None:
+                self._arp_release_sustain(st)
+                vid = self._arp_voice_on(hand, window_center, gain, "pluck")
+                st["sustain_voice_id"] = vid
+                st["sustain_n"] = window_center
+            else:
+                # Keep gain/freq current while held.
+                n = window_center
+                if n in self._voices and self._voices[n].voice_id == st["sustain_voice_id"]:
+                    self._voices[n].gain = max(0.0, min(1.0, float(gain)))
+                    self._voices[n].freq = self.f1 * n
+            if dir_crossed:
+                # Zero-cross while sustained: re-trigger same center (new attack).
+                vid = self._arp_voice_on(hand, window_center, gain, "pluck")
+                st["sustain_voice_id"] = vid
+                st["sustain_n"] = window_center
+            return
+
+        # rate > 0: leave sustain mode
+        if st["sustain_voice_id"] is not None:
+            self._arp_release_sustain(st)
+
+        subdiv = density_to_subdiv(density)
+        steps_per_beat = max(0.0, rate) * subdiv
+        step_rate_hz = steps_per_beat * (bpm / 60.0)
+        if step_rate_hz <= 0.0:
+            return
+        step_period = 1.0 / step_rate_hz
+
+        # Clamp cursor into current window before stepping.
+        cursor = int(st["cursor_n"])
+        if cursor < lo or cursor > hi:
+            cursor = max(lo, min(hi, cursor))
+            st["cursor_n"] = cursor
+
+        if dir_crossed:
+            cursor = self._arp_step_cursor(cursor, new_sign, lo, hi)
+            st["cursor_n"] = cursor
+            self._arp_trigger_step(hand, st, cursor, gain, gate, step_period)
+
+        st["step_phase"] += step_rate_hz * dt
+        # Guard against huge dt (catch-up) flooding the polyphony budget.
+        max_steps = 32
+        steps = 0
+        while st["step_phase"] >= 1.0 and steps < max_steps:
+            st["step_phase"] -= 1.0
+            steps += 1
+            sign = self._arp_dir_sign(st["settled_dir"], st["last_dir_sign"])
+            cursor = self._arp_step_cursor(int(st["cursor_n"]), sign, lo, hi)
+            st["cursor_n"] = cursor
+            self._arp_trigger_step(hand, st, cursor, gain, gate, step_period)
+
+    @staticmethod
+    def _arp_step_cursor(cursor: int, sign: float, lo: int, hi: int) -> int:
+        step = 1 if sign >= 0 else -1
+        n = cursor + step
+        if n > hi:
+            n = lo
+        elif n < lo:
+            n = hi
+        return n
+
+    def _arp_cancel_pending_for(self, st: dict, voice_id: int) -> None:
+        """Drop scheduled offs for ``voice_id`` so a re-trigger is not killed early."""
+        st["pending_offs"] = [
+            (t, vid) for (t, vid) in st["pending_offs"] if vid != voice_id
+        ]
+
+    def _arp_trigger_step(
+        self,
+        hand: int,
+        st: dict,
+        cursor: int,
+        gain: float,
+        gate: float,
+        step_period: float,
+    ) -> None:
+        vid = arp_voice_id(hand, cursor)
+        # Cancel any prior gate for this band id before re-triggering.
+        self._arp_cancel_pending_for(st, vid)
+        vid = self._arp_voice_on(hand, cursor, gain, "pluck")
+        # Schedule voice_off after gate * step_period (legato if gate≈1).
+        off_after = max(0.0, float(gate) * float(step_period))
+        if off_after <= 0.0:
+            # Immediate off still allows a one-block click via attack; release now.
+            self._arp_voice_off(vid)
+        else:
+            st["pending_offs"].append((off_after, vid))
 
     def get_beat_phase(self) -> float:
         """Current beat phase in 0..1 (fraction of one beat)."""
@@ -539,6 +944,21 @@ class VoiceParameterStore:
                 "clock_bpm": self._clock_bpm,
                 "settle_beats": self._settle_beats,
                 "generator_enable": self._generator_enable,
+                "arp": {
+                    str(h): {
+                        "enabled": st["enabled"],
+                        "cursor_n": st["cursor_n"],
+                        "step_phase": round(st["step_phase"], 4),
+                        "rate": round(st["settled_rate"], 4),
+                        "direction": round(st["settled_dir"], 4),
+                        "density": round(st["settled_density"], 4),
+                        "register_lo": int(round(st["settled_lo"])),
+                        "register_hi": int(round(st["settled_hi"])),
+                        "gate": round(st["settled_gate"], 4),
+                        "gain": round(st["settled_gain"], 4),
+                    }
+                    for h, st in sorted(self._arp_state.items())
+                },
                 "voices": {
                     str(k): {
                         "gain": v.gain,
@@ -552,7 +972,13 @@ class VoiceParameterStore:
                         "lfo_phase": v.lfo_phase,
                         "active": v.active,
                         "freq": v.freq,
+                        "envelope_profile": v.envelope_profile,
                     }
                     for k, v in sorted(self._voices.items())
                 },
             }
+
+
+def advance_arp(dt: float, store: "VoiceParameterStore") -> None:
+    """Module-level entry for the audio callback / tests: advance_arp(dt, store)."""
+    store.advance_arp(dt)

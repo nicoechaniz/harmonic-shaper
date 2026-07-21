@@ -145,6 +145,15 @@ class ShaperOSCReceiver:
         dispatcher.map("/digital/clock/bpm", self._on_clock_bpm)
         dispatcher.map("/digital/settle_beats", self._on_settle_beats)
         dispatcher.map("/digital/generator/enable", self._on_generator_enable)
+        # Arpeggiator H=0 (MVP). Path form /digital/arp/{H}/param.
+        dispatcher.map("/digital/arp/*/enable", self._on_arp_enable)
+        dispatcher.map("/digital/arp/*/rate", self._on_arp_rate)
+        dispatcher.map("/digital/arp/*/direction", self._on_arp_direction)
+        dispatcher.map("/digital/arp/*/density", self._on_arp_density)
+        dispatcher.map("/digital/arp/*/register_lo", self._on_arp_register_lo)
+        dispatcher.map("/digital/arp/*/register_hi", self._on_arp_register_hi)
+        dispatcher.map("/digital/arp/*/gate", self._on_arp_gate)
+        dispatcher.map("/digital/arp/*/gain", self._on_arp_gain)
         dispatcher.map("/digital/panic", lambda *_: self._store.panic())
         dispatcher.set_default_handler(lambda *_: None)
         self._serve(dispatcher, self._shaper_port, "shaper-direct-osc")
@@ -212,3 +221,55 @@ class ShaperOSCReceiver:
         """``/digital/generator/enable`` int 0|1 — generators on/off."""
         del addr
         self._store.set_generator_enable(int(value))
+
+    # Arpeggiator /digital/arp/{H}/*
+
+    @staticmethod
+    def _parse_arp_hand(addr: str) -> Optional[int]:
+        """Parse hand index H from ``/digital/arp/{H}/...`` (path segment 3)."""
+        try:
+            h = int(addr.split("/")[3])
+        except (IndexError, ValueError):
+            return None
+        # MVP: H=0 only; accept 0..7 for forward-compatible addressing.
+        return h if 0 <= h <= 7 else None
+
+    def _on_arp_enable(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_enable(h, int(value))
+
+    def _on_arp_rate(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_rate(h, float(value))
+
+    def _on_arp_direction(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_direction(h, float(value))
+
+    def _on_arp_density(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_density(h, float(value))
+
+    def _on_arp_register_lo(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_register_lo(h, int(float(value)))
+
+    def _on_arp_register_hi(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_register_hi(h, int(float(value)))
+
+    def _on_arp_gate(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_gate(h, float(value))
+
+    def _on_arp_gain(self, addr, value, *_) -> None:
+        h = self._parse_arp_hand(addr)
+        if h is not None:
+            self._store.set_arp_gain(h, float(value))

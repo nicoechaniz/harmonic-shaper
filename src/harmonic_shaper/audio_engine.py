@@ -139,7 +139,14 @@ class AudioEngine:
         if status:
             log.debug("Audio status: %s", status)
         dt = frames / self._sample_rate
-        voices = self._store.get_snapshot()  # active voices only
+
+        # ── LFO + beat clock, then Shaper-owned generators ────────────
+        lfo_val = self._store.advance_lfo(dt)  # -1..+1; also advances beat phase
+        lfo_amount = self._store.get_lfo_amount()  # global 0..1
+        # Arpeggiator reads settled params and emits voice_on/off on its band.
+        self._store.advance_arp(dt)
+
+        voices = self._store.get_snapshot()  # active voices only (post-arp)
         active_ns = set(voices.keys())
         tracked_ns = set(self._voice_state.keys())
 
@@ -166,9 +173,6 @@ class AudioEngine:
                 n_active += 1
         norm = 1.0 / (n_active ** 0.5) if n_active > 0 else 1.0
 
-        # ── LFO: advance and get current value ────────────────────────
-        lfo_val = self._store.advance_lfo(dt)  # -1..+1
-        lfo_amount = self._store.get_lfo_amount()  # global 0..1
         # Scene mask: harmonics above the ceiling enter natural release
         # (target_env=0) without hard-cutting; rising ceiling re-enables them.
         partial_ceiling = self._store.get_partial_ceiling()

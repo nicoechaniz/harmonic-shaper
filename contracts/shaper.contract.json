@@ -16,7 +16,7 @@
         "bind": "0.0.0.0",
         "namespace": "/digital",
         "config_key": "SHAPER_OSC_PORT",
-        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/clock/bpm, /digital/settle_beats, /digital/generator/enable, /digital/panic."
+        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/clock/bpm, /digital/settle_beats, /digital/generator/enable, /digital/arp/*/*, /digital/panic."
       },
       {
         "role": "nh_broadcast_slave",
@@ -284,6 +284,238 @@
       "listener_port": 9002
     },
     {
+      "name": "arp_enable",
+      "address_pattern": "/digital/arp/{H}/enable",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "enable",
+          "type": "int32",
+          "range": [
+            0,
+            1
+          ],
+          "polarity": "0 = this arpeggiator hand off; 1 = on. MVP implements H=0. Voice band -20000-H*1000-n."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. Hand also gated by /digital/generator/enable.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_rate",
+      "address_pattern": "/digital/arp/{H}/rate",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "steps_per_beat",
+          "type": "float32",
+          "range": [
+            0.0,
+            8.0
+          ],
+          "polarity": "Steps per musical beat. 0 = sustain single note at window center. Eased over settle_beats."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; audio callback eases settled_rate with eased_target over settle_beats.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_direction",
+      "address_pattern": "/digital/arp/{H}/direction",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "dir",
+          "type": "float32",
+          "range": [
+            -1.0,
+            1.0
+          ],
+          "polarity": "-1 = downward cursor; +1 = upward. Zero-crossing of settled direction re-triggers a step."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; eased over settle_beats. Sign of settled value drives cursor step.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_density",
+      "address_pattern": "/digital/arp/{H}/density",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "fill",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "0 = no subdivision (factor 1); 1 = max subdivision (factor 8). Quantized to {1,2,3,4,6,8}."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; eased over settle_beats. Effective step rate = rate * subdiv(density).",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_register_lo",
+      "address_pattern": "/digital/arp/{H}/register_lo",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "n",
+          "type": "float32",
+          "range": [
+            1.0,
+            32.0
+          ],
+          "polarity": "Lower edge of this hand's partial window (1..32). Effective window is [lo,hi] ∩ [1,ceiling]."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; eased over settle_beats then rounded to integer partial.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_register_hi",
+      "address_pattern": "/digital/arp/{H}/register_hi",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "n",
+          "type": "float32",
+          "range": [
+            1.0,
+            32.0
+          ],
+          "polarity": "Upper edge of this hand's partial window (1..32). Clamped by partial_ceiling in the callback."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; eased over settle_beats then rounded to integer partial.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_gate",
+      "address_pattern": "/digital/arp/{H}/gate",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "frac",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "Fraction of step period the note stays on (staccato↔legato). voice_off scheduled after gate*step_period."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; eased over settle_beats.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "arp_gain",
+      "address_pattern": "/digital/arp/{H}/gain",
+      "parameters": {
+        "H": {
+          "type": "int32",
+          "bounds": [
+            0,
+            7
+          ]
+        }
+      },
+      "arguments": [
+        {
+          "name": "g",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "Arpeggiator hand gain 0..1 applied to each triggered voice."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Target write; eased over settle_beats.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
       "name": "panic",
       "address_pattern": "/digital/panic",
       "parameters": {},
@@ -467,7 +699,8 @@
         "clock_bpm",
         "settle_beats",
         "generator_enable",
-        "voices.{n}.{gain,pan,phase_deg,attack_s,release_s,shape,lfo_gain,lfo_pan,lfo_phase,active,freq}"
+        "arp.{H}.{enabled,cursor_n,step_phase,rate,direction,density,register_lo,register_hi,gate,gain}",
+        "voices.{n}.{gain,pan,phase_deg,attack_s,release_s,shape,lfo_gain,lfo_pan,lfo_phase,active,freq,envelope_profile}"
       ],
       "related_http": [
         "GET /api/state — same store.to_dict() snapshot",

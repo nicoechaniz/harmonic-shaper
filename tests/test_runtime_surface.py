@@ -49,6 +49,14 @@ def test_local_osc_table_stays_wire_compatible() -> None:
         "/digital/clock/bpm",
         "/digital/settle_beats",
         "/digital/generator/enable",
+        "/digital/arp/*/enable",
+        "/digital/arp/*/rate",
+        "/digital/arp/*/direction",
+        "/digital/arp/*/density",
+        "/digital/arp/*/register_lo",
+        "/digital/arp/*/register_hi",
+        "/digital/arp/*/gate",
+        "/digital/arp/*/gain",
         "/digital/panic",
     }
 
