@@ -102,6 +102,30 @@ def create_app(store: VoiceParameterStore) -> "FastAPI":
             store.set_lfo_waveform(value)
             return {"ok": True, "param": param, "value": value}
 
+        # Dedicated bodies: clock uses {"bpm": ...}, settle uses {"beats": ...}.
+        if param == "clock":
+            try:
+                value = float(body.get("bpm", body.get("clock_bpm", 0.0)))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, "invalid value for clock bpm") from exc
+            store.set_clock_bpm(value)
+            return {
+                "ok": True,
+                "param": param,
+                "bpm": store.get_clock_bpm(),
+            }
+        if param == "settle":
+            try:
+                value = float(body.get("beats", body.get("settle_beats", 0.0)))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, "invalid value for settle beats") from exc
+            store.set_settle_beats(value)
+            return {
+                "ok": True,
+                "param": param,
+                "beats": store.get_settle_beats(),
+            }
+
         try:
             value = float(body.get(param, 0.0))
         except (TypeError, ValueError) as exc:
@@ -127,6 +151,19 @@ def create_app(store: VoiceParameterStore) -> "FastAPI":
                 "param": param,
                 "value": value,
                 "partial_ceiling": store.get_partial_ceiling(),
+            }
+        elif param == "clock_bpm":
+            store.set_clock_bpm(value)
+            return {"ok": True, "param": param, "value": store.get_clock_bpm()}
+        elif param == "settle_beats":
+            store.set_settle_beats(value)
+            return {"ok": True, "param": param, "value": store.get_settle_beats()}
+        elif param == "generator_enable":
+            store.set_generator_enable(int(value))
+            return {
+                "ok": True,
+                "param": param,
+                "value": int(store.get_generator_enable()),
             }
         else:
             raise HTTPException(400, f"unknown global param: {param}")

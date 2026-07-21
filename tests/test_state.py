@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 
 import numpy as np
@@ -173,6 +174,113 @@ def _drive_audio_block(engine: AudioEngine, frames: int = 256) -> np.ndarray:
     out = np.zeros((frames, 2), dtype=np.float32)
     engine._audio_callback(out, frames, None, None)
     return out
+
+
+# ─── clock_bpm + settle_beats + generator_enable ──────────────────────
+
+
+def test_clock_bpm_default_and_clamp() -> None:
+    store = VoiceParameterStore()
+    assert store.get_clock_bpm() == 90.0
+    assert store.to_dict()["clock_bpm"] == 90.0
+
+    store.set_clock_bpm(120.0)
+    assert store.get_clock_bpm() == 120.0
+
+    store.set_clock_bpm(10.0)
+    assert store.get_clock_bpm() == 20.0
+
+    store.set_clock_bpm(300.0)
+    assert store.get_clock_bpm() == 240.0
+
+
+def test_clock_bpm_120_produces_two_phase_cycles_per_second() -> None:
+    """At 120 BPM, phase rate is 2 Hz → two full 0..1 cycles per second."""
+    store = VoiceParameterStore()
+    store.set_clock_bpm(120.0)
+    assert store.get_beat_phase() == 0.0
+
+    # Integrate 1.0 s in small steps; phase wraps each cycle so count crossings.
+    steps = 1000
+    dt = 1.0 / steps
+    crossings = 0
+    prev = store.get_beat_phase()
+    for _ in range(steps):
+        phase = store.advance_beat(dt)
+        if phase < prev:
+            crossings += 1
+        prev = phase
+    assert crossings == 2
+
+
+def test_clock_bpm_120_half_second_advances_phase_by_one() -> None:
+    """Over 0.5 s at 120 BPM, unwrapped phase advances by exactly 1.0."""
+    store = VoiceParameterStore()
+    store.set_clock_bpm(120.0)
+    # advance_beat wraps; measure unwrapped progress via rate * dt sum.
+    # Single call of 0.5 s: rate=2 Hz → +1.0, wraps to 0.0.
+    phase = store.advance_beat(0.5)
+    assert abs(phase - 0.0) < 1e-12
+    # From a known start, two quarter-second steps also sum to 1.0 cycle.
+    store2 = VoiceParameterStore()
+    store2.set_clock_bpm(120.0)
+    store2.advance_beat(0.25)
+    assert abs(store2.get_beat_phase() - 0.5) < 1e-12
+    store2.advance_beat(0.25)
+    assert abs(store2.get_beat_phase() - 0.0) < 1e-12
+    # Explicit: delta_phase = bpm/60 * dt = 2.0 * 0.5 = 1.0
+    assert abs((120.0 / 60.0) * 0.5 - 1.0) < 1e-12
+
+
+def test_settle_beats_ease_reaches_63pct_after_one_beat() -> None:
+    """settle_beats=1.0: after 1 beat, eased value is ~63.2% of the way to target."""
+    store = VoiceParameterStore()
+    store.set_settle_beats(1.0)
+    assert store.get_settle_beats() == 1.0
+    assert store.to_dict()["settle_beats"] == 1.0
+
+    current = 0.0
+    target = 1.0
+    eased = VoiceParameterStore.eased_target(current, target, delta_beats=1.0, settle_beats=1.0)
+    expected = 1.0 - math.exp(-1.0)  # ≈ 0.6321205588
+    assert abs(eased - expected) < 1e-12
+    assert abs(eased - 0.6321205588285577) < 1e-9
+
+    # Clamp range
+    store.set_settle_beats(0.01)
+    assert store.get_settle_beats() == 0.25
+    store.set_settle_beats(10.0)
+    assert store.get_settle_beats() == 4.0
+
+
+def test_generator_enable_default_and_osc_zero() -> None:
+    store = VoiceParameterStore()
+    assert store.get_generator_enable() is True
+    assert store.to_dict()["generator_enable"] is True
+
+    store.set_generator_enable(0)
+    assert store.get_generator_enable() is False
+    assert store.to_dict()["generator_enable"] is False
+
+    store.set_generator_enable(1)
+    assert store.get_generator_enable() is True
+
+    # OSC handler path
+    receiver = object.__new__(ShaperOSCReceiver)
+    receiver._store = store
+    receiver._on_generator_enable("/digital/generator/enable", 0)
+    assert store.get_generator_enable() is False
+    receiver._on_clock_bpm("/digital/clock/bpm", 140.0)
+    assert store.get_clock_bpm() == 140.0
+    receiver._on_settle_beats("/digital/settle_beats", 2.0)
+    assert store.get_settle_beats() == 2.0
+
+
+def test_advance_lfo_also_advances_beat_phase() -> None:
+    store = VoiceParameterStore()
+    store.set_clock_bpm(120.0)
+    store.advance_lfo(0.25)
+    assert abs(store.get_beat_phase() - 0.5) < 1e-12
 
 
 def test_ceiling_drop_releases_high_partials_and_raise_restores() -> None:

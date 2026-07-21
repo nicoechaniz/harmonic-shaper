@@ -46,6 +46,9 @@ def test_local_osc_table_stays_wire_compatible() -> None:
         "/digital/harmonic/*/phase",
         "/digital/master",
         "/digital/ceiling",
+        "/digital/clock/bpm",
+        "/digital/settle_beats",
+        "/digital/generator/enable",
         "/digital/panic",
     }
 

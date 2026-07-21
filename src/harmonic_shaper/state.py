@@ -89,6 +89,12 @@ class VoiceParameterStore:
         # High partials above the ceiling enter natural release in the audio
         # callback; panic does not reset this value.
         self._partial_ceiling: int = config.N_BANDS
+        # Musical clock (Shaper-owned). Weaver may converge clock_bpm from body
+        # tempo; settle_beats is the ease time constant in local beats, not ms.
+        self._clock_bpm: float = 90.0
+        self._settle_beats: float = 1.0
+        self._generator_enable: bool = True
+        self._beat_phase: float = 0.0  # 0..1, advances at bpm/60 Hz
         self._on_change = on_change
         self._panic_callback: Optional[Callable[[], None]] = None
 
@@ -288,6 +294,79 @@ class VoiceParameterStore:
         with self._lock:
             return self._partial_ceiling
 
+    # ─── Musical clock + settle (local-beat timebase) ─────────────────
+
+    def set_clock_bpm(self, bpm: float) -> None:
+        """Set musical clock tempo in BPM (clamped 20..240). Default 90."""
+        with self._lock:
+            self._clock_bpm = max(20.0, min(240.0, float(bpm)))
+        self._notify()
+
+    def get_clock_bpm(self) -> float:
+        with self._lock:
+            return self._clock_bpm
+
+    def set_settle_beats(self, beats: float) -> None:
+        """Set ease time constant in local beats (clamped 0.25..4.0). Default 1.0."""
+        with self._lock:
+            self._settle_beats = max(0.25, min(4.0, float(beats)))
+        self._notify()
+
+    def get_settle_beats(self) -> float:
+        with self._lock:
+            return self._settle_beats
+
+    def set_generator_enable(self, enabled) -> None:
+        """Enable/disable generators (arpegio/perc). Accepts bool or int 0|1."""
+        with self._lock:
+            if isinstance(enabled, bool):
+                self._generator_enable = enabled
+            else:
+                self._generator_enable = bool(int(enabled))
+        self._notify()
+
+    def get_generator_enable(self) -> bool:
+        with self._lock:
+            return self._generator_enable
+
+    def get_beat_phase(self) -> float:
+        """Current beat phase in 0..1 (fraction of one beat)."""
+        with self._lock:
+            return self._beat_phase
+
+    def advance_beat(self, dt: float) -> float:
+        """Advance beat phase by ``dt`` seconds. Returns phase after advance (0..1).
+
+        At ``clock_bpm`` BPM, phase rate is ``bpm/60`` cycles per second, so
+        120 BPM yields two full phase cycles per second.
+        """
+        with self._lock:
+            rate = self._clock_bpm / 60.0
+            self._beat_phase = (self._beat_phase + rate * float(dt)) % 1.0
+            return self._beat_phase
+
+    @staticmethod
+    def eased_target(
+        param_current: float,
+        param_target: float,
+        delta_beats: float,
+        settle_beats: float,
+    ) -> float:
+        """Exponential ease of ``param_current`` toward ``param_target`` over beats.
+
+        ``param_current + (target - current) * (1 - exp(-delta_beats / settle_beats))``.
+
+        With settle_beats=1.0 and delta_beats=1.0 the result is ~63.2% of the
+        way from current to target (one time constant). Network-robust: time is
+        measured in local musical beats, not wall-clock milliseconds.
+        """
+        if settle_beats <= 0.0:
+            return float(param_target)
+        if delta_beats <= 0.0:
+            return float(param_current)
+        alpha = 1.0 - math.exp(-float(delta_beats) / float(settle_beats))
+        return float(param_current) + (float(param_target) - float(param_current)) * alpha
+
     def set_global_attack(self, attack_s: float) -> None:
         with self._lock:
             self._global_attack_s = max(0.0, min(5.0, float(attack_s)))
@@ -366,8 +445,15 @@ class VoiceParameterStore:
         self._notify()
 
     def advance_lfo(self, dt: float) -> float:
-        """Advance LFO phase by dt seconds. Returns current LFO value -1..+1."""
+        """Advance LFO phase by dt seconds. Returns current LFO value -1..+1.
+
+        Also advances the musical beat phase (``_beat_phase``) so the clock
+        keeps running on the same audio-callback timebase as the LFO.
+        """
         with self._lock:
+            # Musical clock: bpm/60 cycles per second.
+            rate = self._clock_bpm / 60.0
+            self._beat_phase = (self._beat_phase + rate * float(dt)) % 1.0
             period = self._strum_period_s * self._lfo_rate_divisor
             if period <= 0:
                 period = 0.5
@@ -450,6 +536,9 @@ class VoiceParameterStore:
                 "lfo_amount": self._lfo_amount,
                 "strum_period_s": round(self._strum_period_s, 3),
                 "partial_ceiling": self._partial_ceiling,
+                "clock_bpm": self._clock_bpm,
+                "settle_beats": self._settle_beats,
+                "generator_enable": self._generator_enable,
                 "voices": {
                     str(k): {
                         "gain": v.gain,

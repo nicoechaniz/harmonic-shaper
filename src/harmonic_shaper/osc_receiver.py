@@ -142,6 +142,9 @@ class ShaperOSCReceiver:
         dispatcher.map("/digital/harmonic/*/phase", self._on_phase)
         dispatcher.map("/digital/master", self._on_master)
         dispatcher.map("/digital/ceiling", self._on_ceiling)
+        dispatcher.map("/digital/clock/bpm", self._on_clock_bpm)
+        dispatcher.map("/digital/settle_beats", self._on_settle_beats)
+        dispatcher.map("/digital/generator/enable", self._on_generator_enable)
         dispatcher.map("/digital/panic", lambda *_: self._store.panic())
         dispatcher.set_default_handler(lambda *_: None)
         self._serve(dispatcher, self._shaper_port, "shaper-direct-osc")
@@ -194,3 +197,18 @@ class ShaperOSCReceiver:
         """``/digital/ceiling`` level 0..1 → partial_ceiling 1..32."""
         del addr
         self._store.set_partial_ceiling_from_level(float(value))
+
+    def _on_clock_bpm(self, addr, value, *_) -> None:
+        """``/digital/clock/bpm`` musical clock tempo in BPM (20..240)."""
+        del addr
+        self._store.set_clock_bpm(float(value))
+
+    def _on_settle_beats(self, addr, value, *_) -> None:
+        """``/digital/settle_beats`` ease time constant in local beats (0.25..4)."""
+        del addr
+        self._store.set_settle_beats(float(value))
+
+    def _on_generator_enable(self, addr, value, *_) -> None:
+        """``/digital/generator/enable`` int 0|1 — generators on/off."""
+        del addr
+        self._store.set_generator_enable(int(value))

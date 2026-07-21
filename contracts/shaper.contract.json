@@ -16,7 +16,7 @@
         "bind": "0.0.0.0",
         "namespace": "/digital",
         "config_key": "SHAPER_OSC_PORT",
-        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/panic."
+        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/clock/bpm, /digital/settle_beats, /digital/generator/enable, /digital/panic."
       },
       {
         "role": "nh_broadcast_slave",
@@ -221,6 +221,69 @@
       "listener_port": 9002
     },
     {
+      "name": "clock_bpm",
+      "address_pattern": "/digital/clock/bpm",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "bpm",
+          "type": "float32",
+          "range": [
+            20.0,
+            240.0
+          ],
+          "polarity": "Musical clock tempo in BPM. Clamped in VoiceParameterStore.set_clock_bpm. Default 90. Shaper-owned; Weaver may converge this from body tempo. Beat phase advances at bpm/60 cycles per second."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. Beat phase accumulator (_beat_phase 0..1) uses the new rate on subsequent advance_beat/advance_lfo calls. Scene parameter — panic does not reset it.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "settle_beats",
+      "address_pattern": "/digital/settle_beats",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "beats",
+          "type": "float32",
+          "range": [
+            0.25,
+            4.0
+          ],
+          "polarity": "Ease time constant in local musical beats (not ms). Clamped in VoiceParameterStore.set_settle_beats. Default 1.0. Used by eased_target(current, target, delta_beats, settle_beats)."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. Convergence itself is exponential ease over local beats (1 - exp(-delta_beats/settle_beats)), network-robust because time is musical not wall-clock. Scene parameter — panic does not reset it.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "generator_enable",
+      "address_pattern": "/digital/generator/enable",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "enable",
+          "type": "int32",
+          "range": [
+            0,
+            1
+          ],
+          "polarity": "0 = generators (arpegio/perc) off; 1 = on. Default 1. Stored as bool in VoiceParameterStore.set_generator_enable."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. Gate for Shaper-owned generators; does not silence harmonic envelope voices. Scene parameter — panic does not reset it.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
       "name": "panic",
       "address_pattern": "/digital/panic",
       "parameters": {},
@@ -401,12 +464,17 @@
         "lfo_amount",
         "strum_period_s",
         "partial_ceiling",
+        "clock_bpm",
+        "settle_beats",
+        "generator_enable",
         "voices.{n}.{gain,pan,phase_deg,attack_s,release_s,shape,lfo_gain,lfo_pan,lfo_phase,active,freq}"
       ],
       "related_http": [
         "GET /api/state — same store.to_dict() snapshot",
         "POST /api/shaper/{n}/{param} — per-voice REST control (gain|pan|phase_deg|attack_s|release_s|shape|lfo_gain|lfo_pan|lfo_phase)",
-        "POST /api/shaper/global/{param} — global REST control (attack|release|master|sidechain|lfo_rate_divisor|lfo_waveform|lfo_amount|ceiling)"
+        "POST /api/shaper/global/{param} — global REST control (attack|release|master|sidechain|lfo_rate_divisor|lfo_waveform|lfo_amount|ceiling|clock|settle|clock_bpm|settle_beats|generator_enable)",
+        "POST /api/shaper/global/clock — body {\"bpm\": 120}",
+        "POST /api/shaper/global/settle — body {\"beats\": 1.0}"
       ]
     },
     "request_address": "/digital/state",
