@@ -30,14 +30,34 @@ _ARP_DENSITY_SUBDIVS: tuple[int, ...] = (1, 2, 3, 4, 6, 8)
 
 # Arpeggiator voice_id band: -20000 - H*1000 - n  (H hand, n harmonic 1..32).
 _ARP_VOICE_ID_BASE = -20_000
-_ARP_HANDS = (0,)  # H=0 first; H=1.. later
+_ARP_HANDS = (0, 1)  # H=0 and H=1; H=2.. reserved
 _ARP_RATE_EPS = 0.01
 _ARP_DIR_EPS = 1e-6
+
+# Foot percussion pool: voice_id -30000 .. -30007 (8 rotating slots).
+_PERC_VOICE_ID_BASE = -30_000
+_PERC_POOL_SIZE = 8
+_PERC_RELEASE_S = ENVELOPE_PROFILES["perc"][1]  # schedule voice_off after release
+# Timbre MVP: cycle low partials n ∈ {1, 2, 3}.
+_PERC_PARTIALS: tuple[int, ...] = (1, 2, 3)
 
 
 def arp_voice_id(hand: int, harmonic_n: int) -> int:
     """Dedicated voice_id for arpeggiator hand H, partial n."""
     return _ARP_VOICE_ID_BASE - int(hand) * 1000 - int(harmonic_n)
+
+
+def perc_voice_id(slot: int) -> int:
+    """Dedicated voice_id for percussion pool slot k (0..7) → -30000..-30007."""
+    k = int(slot) % _PERC_POOL_SIZE
+    return _PERC_VOICE_ID_BASE - k
+
+
+def is_perc_voice_id(voice_id: Optional[int]) -> bool:
+    """True if voice_id belongs to the foot-percussion pool."""
+    if voice_id is None:
+        return False
+    return _PERC_VOICE_ID_BASE - (_PERC_POOL_SIZE - 1) <= int(voice_id) <= _PERC_VOICE_ID_BASE
 
 
 def density_to_subdiv(fill: float) -> int:
@@ -76,6 +96,23 @@ def _default_arp_state(hand: int = 0) -> dict:
         # rate≈0 sustain bookkeeping
         "sustain_voice_id": None,
         "sustain_n": None,
+    }
+
+
+def _default_perc_state() -> dict:
+    """Fresh foot-percussion runtime state."""
+    return {
+        "enabled": False,
+        "rate": 0.0,          # pulses_per_beat 0..8
+        "gain": 0.7,
+        "accent": 0.0,        # 0..1 downbeat accent
+        "step_phase": 0.0,    # 0..1 within one pulse
+        "pulse_index": 0,     # counts pulses; 0 ≡ downbeat when rate≥1
+        "next_slot": 0,       # rotating oldest-first pool index 0..7
+        # scheduled voice_off: list of (remaining_s, voice_id)
+        "pending_offs": [],
+        # active pool slots for diagnostics (voice_id list, oldest first)
+        "active_slots": [],
     }
 
 
@@ -170,10 +207,16 @@ class VoiceParameterStore:
         self._settle_beats: float = 1.0
         self._generator_enable: bool = True
         self._beat_phase: float = 0.0  # 0..1, advances at bpm/60 Hz
-        # Arpeggiator per hand H (MVP: H=0). Settled params ease over settle_beats.
+        # Arpeggiator per hand H (H=0, H=1). Settled params ease over settle_beats.
         self._arp_state: dict[int, dict] = {
             h: _default_arp_state(h) for h in _ARP_HANDS
         }
+        # Foot percussion pool (voice_id -30000..-30007); separate from melodic norm.
+        self._perc_enabled: bool = False
+        self._perc_rate: float = 0.0
+        self._perc_gain: float = 0.7
+        self._perc_accent: float = 0.0
+        self._perc_state: dict = _default_perc_state()
         self._on_change = on_change
         self._panic_callback: Optional[Callable[[], None]] = None
 
@@ -425,7 +468,7 @@ class VoiceParameterStore:
         with self._lock:
             return self._generator_enable
 
-    # ─── Arpeggiator (H hands; MVP H=0) ────────────────────────────────
+    # ─── Arpeggiator (H hands; H=0 and H=1) ───────────────────────────
 
     def _ensure_arp(self, hand: int) -> dict:
         h = int(hand)
@@ -734,6 +777,208 @@ class VoiceParameterStore:
         else:
             st["pending_offs"].append((off_after, vid))
 
+    # ─── Foot percussion (dedicated pool, separate melodic norm) ─────
+
+    def set_perc_enable(self, enabled) -> None:
+        """Enable/disable foot percussion. Accepts bool or int 0|1."""
+        with self._lock:
+            if isinstance(enabled, bool):
+                self._perc_enabled = enabled
+            else:
+                self._perc_enabled = bool(int(enabled))
+            self._perc_state["enabled"] = self._perc_enabled
+            if not self._perc_enabled:
+                # Stop scheduling new hits; pending offs still tick in advance_perc.
+                self._perc_state["step_phase"] = 0.0
+        self._notify()
+
+    def set_perc_rate(self, pulses_per_beat: float) -> None:
+        """Pulses per musical beat 0..8. 0 = silent (no steps)."""
+        with self._lock:
+            self._perc_rate = max(0.0, min(8.0, float(pulses_per_beat)))
+            self._perc_state["rate"] = self._perc_rate
+        self._notify()
+
+    def set_perc_gain(self, gain: float) -> None:
+        """Percussion gain 0..1."""
+        with self._lock:
+            self._perc_gain = max(0.0, min(1.0, float(gain)))
+            self._perc_state["gain"] = self._perc_gain
+        self._notify()
+
+    def set_perc_accent(self, accent: float) -> None:
+        """Downbeat accent amount 0..1 (extra gain on pulse_index % rate ≈ 0)."""
+        with self._lock:
+            self._perc_accent = max(0.0, min(1.0, float(accent)))
+            self._perc_state["accent"] = self._perc_accent
+        self._notify()
+
+    def get_perc_state(self) -> dict:
+        """Copy of percussion runtime state for tests / diagnostics."""
+        with self._lock:
+            out = {
+                "enabled": self._perc_enabled,
+                "rate": self._perc_rate,
+                "gain": self._perc_gain,
+                "accent": self._perc_accent,
+                "step_phase": self._perc_state["step_phase"],
+                "pulse_index": self._perc_state["pulse_index"],
+                "next_slot": self._perc_state["next_slot"],
+                "pending_offs": list(self._perc_state["pending_offs"]),
+                "active_slots": list(self._perc_state["active_slots"]),
+            }
+            return out
+
+    def _perc_slot_key(self, slot: int) -> int:
+        """Dict key for perc pool slot — same as voice_id (-30000..-30007)."""
+        return perc_voice_id(slot)
+
+    def _perc_voice_on(self, slot: int, gain: float, partial_n: int) -> int:
+        """Internal voice_on for perc pool (caller holds lock). Returns voice_id.
+
+        Stored under a dedicated key outside 1..32 so hits never steal melodic
+        harmonic slots. ``harmonic_n`` carries the partial used for f1*n.
+        """
+        vid = perc_voice_id(slot)
+        key = self._perc_slot_key(slot)
+        n = max(1, min(config.N_BANDS, int(partial_n)))
+        freq = self.f1 * n
+        if key not in self._voices:
+            self._voices[key] = VoiceParams(harmonic_n=n)
+        v = self._voices[key]
+        v.harmonic_n = n
+        v.voice_id = vid
+        v.freq = freq
+        v.active = True
+        v.gain = max(0.0, min(1.0, float(gain)))
+        v.apply_envelope_profile("perc")
+        # Do NOT touch melodic _active_history — perc has its own rotating pool.
+        return vid
+
+    def _perc_voice_off(self, voice_id: int) -> None:
+        """Internal voice_off for a perc voice_id (caller holds lock)."""
+        for key, v in self._voices.items():
+            if v.voice_id == voice_id and is_perc_voice_id(voice_id):
+                if v.envelope_profile in ENVELOPE_PROFILES:
+                    v.apply_envelope_profile(v.envelope_profile)
+                v.active = False
+                break
+        # Drop from active_slots diagnostics
+        st = self._perc_state
+        st["active_slots"] = [vid for vid in st["active_slots"] if vid != voice_id]
+
+    def _perc_tick_pending_offs(self, dt: float) -> None:
+        st = self._perc_state
+        remaining: list[tuple[float, int]] = []
+        for t_left, vid in st["pending_offs"]:
+            t_left -= dt
+            if t_left <= 0.0:
+                self._perc_voice_off(vid)
+            else:
+                remaining.append((t_left, vid))
+        st["pending_offs"] = remaining
+
+    def _perc_trigger_hit(self) -> None:
+        """Fire one percussion hit on the oldest rotating pool slot (caller holds lock)."""
+        st = self._perc_state
+        rate = self._perc_rate
+        base_gain = self._perc_gain
+        accent = self._perc_accent
+        pulse_index = int(st["pulse_index"])
+
+        # Downbeat accent: first pulse of each beat group (when rate ≥ 1).
+        # pulse_index counts hits; every ``max(1, round(rate))`` pulses is a downbeat.
+        steps_per_beat = max(1, int(round(rate))) if rate >= 0.5 else 1
+        is_downbeat = (pulse_index % steps_per_beat) == 0
+        gain = base_gain * (1.0 + (accent if is_downbeat else 0.0))
+        gain = max(0.0, min(1.0, gain))
+
+        slot = int(st["next_slot"]) % _PERC_POOL_SIZE
+        partial = _PERC_PARTIALS[slot % len(_PERC_PARTIALS)]
+        vid = self._perc_voice_on(slot, gain, partial)
+
+        # Cancel any prior pending off for this slot before re-using it.
+        st["pending_offs"] = [
+            (t, v) for (t, v) in st["pending_offs"] if v != vid
+        ]
+        # Short perc envelope: schedule voice_off after release (~80 ms).
+        st["pending_offs"].append((_PERC_RELEASE_S, vid))
+
+        if vid in st["active_slots"]:
+            st["active_slots"].remove(vid)
+        st["active_slots"].append(vid)
+
+        st["next_slot"] = (slot + 1) % _PERC_POOL_SIZE
+        st["pulse_index"] = pulse_index + 1
+
+    def advance_perc(self, dt: float) -> None:
+        """Advance foot percussion by ``dt`` seconds (audio callback).
+
+        Separate from the arpeggiator. Steps at ``perc_rate * bpm/60`` Hz.
+        Gated by ``generator_enable`` and ``perc_enable``. Perc voices live in
+        a dedicated pool (voice_id -30000..-30007) and must be excluded from
+        the melodic 1/√N normalisation in the audio engine.
+        """
+        dt = float(dt)
+        if dt <= 0.0:
+            return
+        with self._lock:
+            # Always tick pending offs so notes don't hang after disable/panic.
+            self._perc_tick_pending_offs(dt)
+
+            if not self._generator_enable or not self._perc_enabled:
+                return
+
+            rate = self._perc_rate
+            if rate < _ARP_RATE_EPS:
+                self._perc_state["step_phase"] = 0.0
+                return
+
+            bpm = self._clock_bpm
+            pulse_rate_hz = rate * (bpm / 60.0)
+            if pulse_rate_hz <= 0.0:
+                return
+
+            st = self._perc_state
+            st["step_phase"] += pulse_rate_hz * dt
+            max_steps = 32
+            steps = 0
+            while st["step_phase"] >= 1.0 and steps < max_steps:
+                st["step_phase"] -= 1.0
+                steps += 1
+                self._perc_trigger_hit()
+
+    def _clear_arp_runtime(self) -> None:
+        """Reset all arp hands to default runtime (caller holds lock)."""
+        for hand in list(self._arp_state.keys()):
+            self._arp_state[hand] = _default_arp_state(hand)
+        # Ensure both H=0 and H=1 always exist after panic.
+        for h in _ARP_HANDS:
+            if h not in self._arp_state:
+                self._arp_state[h] = _default_arp_state(h)
+
+    def _clear_perc_runtime(self) -> None:
+        """Reset percussion pool runtime (caller holds lock). Scene params kept."""
+        # Deactivate any perc-pool voices still in the store.
+        for key in list(self._voices.keys()):
+            v = self._voices[key]
+            if is_perc_voice_id(v.voice_id) or (
+                key <= _PERC_VOICE_ID_BASE
+                and key >= _PERC_VOICE_ID_BASE - (_PERC_POOL_SIZE - 1)
+            ):
+                v.active = False
+                v.voice_id = None
+        # Preserve enable/rate/gain/accent scene params; clear runtime only.
+        enabled = self._perc_enabled
+        rate = self._perc_rate
+        gain = self._perc_gain
+        accent = self._perc_accent
+        self._perc_state = _default_perc_state()
+        self._perc_state["enabled"] = enabled
+        self._perc_state["rate"] = rate
+        self._perc_state["gain"] = gain
+        self._perc_state["accent"] = accent
+
     def get_beat_phase(self) -> float:
         """Current beat phase in 0..1 (fraction of one beat)."""
         with self._lock:
@@ -899,7 +1144,11 @@ class VoiceParameterStore:
                 self._strum_period_s = sum(intervals) / len(intervals)
 
     def panic(self) -> None:
-        """Clear all voice state. Does not reset scene params (e.g. ceiling)."""
+        """Clear all voice state. Does not reset scene params (e.g. ceiling).
+
+        Also resets arpeggiator runtime (both hands) and the percussion pool
+        so generators do not keep stepping or holding pending offs after panic.
+        """
         with self._lock:
             for v in self._voices.values():
                 v.active = False
@@ -907,6 +1156,8 @@ class VoiceParameterStore:
                 v.pan = 0.0
                 v.phase = 0.0
             self._active_history.clear()
+            self._clear_arp_runtime()
+            self._clear_perc_runtime()
         self._notify()
         # Also notify the MIDI control (Launchpad) to clear lights + state
         if self._panic_callback:
@@ -959,6 +1210,15 @@ class VoiceParameterStore:
                     }
                     for h, st in sorted(self._arp_state.items())
                 },
+                "perc": {
+                    "enabled": self._perc_enabled,
+                    "rate": round(self._perc_rate, 4),
+                    "gain": round(self._perc_gain, 4),
+                    "accent": round(self._perc_accent, 4),
+                    "step_phase": round(self._perc_state["step_phase"], 4),
+                    "pulse_index": int(self._perc_state["pulse_index"]),
+                    "next_slot": int(self._perc_state["next_slot"]),
+                },
                 "voices": {
                     str(k): {
                         "gain": v.gain,
@@ -982,3 +1242,8 @@ class VoiceParameterStore:
 def advance_arp(dt: float, store: "VoiceParameterStore") -> None:
     """Module-level entry for the audio callback / tests: advance_arp(dt, store)."""
     store.advance_arp(dt)
+
+
+def advance_perc(dt: float, store: "VoiceParameterStore") -> None:
+    """Module-level entry for the audio callback / tests: advance_perc(dt, store)."""
+    store.advance_perc(dt)

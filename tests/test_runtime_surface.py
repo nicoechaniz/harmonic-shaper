@@ -57,6 +57,10 @@ def test_local_osc_table_stays_wire_compatible() -> None:
         "/digital/arp/*/register_hi",
         "/digital/arp/*/gate",
         "/digital/arp/*/gain",
+        "/digital/perc/enable",
+        "/digital/perc/rate",
+        "/digital/perc/gain",
+        "/digital/perc/accent",
         "/digital/panic",
     }
 

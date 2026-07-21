@@ -145,7 +145,7 @@ class ShaperOSCReceiver:
         dispatcher.map("/digital/clock/bpm", self._on_clock_bpm)
         dispatcher.map("/digital/settle_beats", self._on_settle_beats)
         dispatcher.map("/digital/generator/enable", self._on_generator_enable)
-        # Arpeggiator H=0 (MVP). Path form /digital/arp/{H}/param.
+        # Arpeggiator H=0, H=1. Path form /digital/arp/{H}/param.
         dispatcher.map("/digital/arp/*/enable", self._on_arp_enable)
         dispatcher.map("/digital/arp/*/rate", self._on_arp_rate)
         dispatcher.map("/digital/arp/*/direction", self._on_arp_direction)
@@ -154,6 +154,11 @@ class ShaperOSCReceiver:
         dispatcher.map("/digital/arp/*/register_hi", self._on_arp_register_hi)
         dispatcher.map("/digital/arp/*/gate", self._on_arp_gate)
         dispatcher.map("/digital/arp/*/gain", self._on_arp_gain)
+        # Foot percussion pool (voice_id -30000..-30007).
+        dispatcher.map("/digital/perc/enable", self._on_perc_enable)
+        dispatcher.map("/digital/perc/rate", self._on_perc_rate)
+        dispatcher.map("/digital/perc/gain", self._on_perc_gain)
+        dispatcher.map("/digital/perc/accent", self._on_perc_accent)
         dispatcher.map("/digital/panic", lambda *_: self._store.panic())
         dispatcher.set_default_handler(lambda *_: None)
         self._serve(dispatcher, self._shaper_port, "shaper-direct-osc")
@@ -273,3 +278,21 @@ class ShaperOSCReceiver:
         h = self._parse_arp_hand(addr)
         if h is not None:
             self._store.set_arp_gain(h, float(value))
+
+    # Foot percussion /digital/perc/*
+
+    def _on_perc_enable(self, addr, value, *_) -> None:
+        del addr
+        self._store.set_perc_enable(int(value))
+
+    def _on_perc_rate(self, addr, value, *_) -> None:
+        del addr
+        self._store.set_perc_rate(float(value))
+
+    def _on_perc_gain(self, addr, value, *_) -> None:
+        del addr
+        self._store.set_perc_gain(float(value))
+
+    def _on_perc_accent(self, addr, value, *_) -> None:
+        del addr
+        self._store.set_perc_accent(float(value))

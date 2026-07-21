@@ -16,7 +16,7 @@
         "bind": "0.0.0.0",
         "namespace": "/digital",
         "config_key": "SHAPER_OSC_PORT",
-        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/clock/bpm, /digital/settle_beats, /digital/generator/enable, /digital/arp/*/*, /digital/panic."
+        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/clock/bpm, /digital/settle_beats, /digital/generator/enable, /digital/arp/*/*, /digital/perc/*, /digital/panic."
       },
       {
         "role": "nh_broadcast_slave",
@@ -303,7 +303,7 @@
             0,
             1
           ],
-          "polarity": "0 = this arpeggiator hand off; 1 = on. MVP implements H=0. Voice band -20000-H*1000-n."
+          "polarity": "0 = this arpeggiator hand off; 1 = on. Implements H=0 and H=1 (voice bands -20001..-20032 and -21001..-21032). Voice band -20000-H*1000-n."
         }
       ],
       "lag_ms": 0.0,
@@ -516,6 +516,90 @@
       "listener_port": 9002
     },
     {
+      "name": "perc_enable",
+      "address_pattern": "/digital/perc/enable",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "enable",
+          "type": "int32",
+          "range": [
+            0,
+            1
+          ],
+          "polarity": "0 = foot percussion off; 1 = on. Also gated by /digital/generator/enable. Pool voice_id -30000..-30007."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. Pending voice_offs still tick after disable so notes do not hang.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "perc_rate",
+      "address_pattern": "/digital/perc/rate",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "pulses_per_beat",
+          "type": "float32",
+          "range": [
+            0.0,
+            8.0
+          ],
+          "polarity": "Percussion pulses per musical beat. 0 = silent. Step rate = rate * bpm/60 Hz."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. advance_perc steps on pulse boundaries.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "perc_gain",
+      "address_pattern": "/digital/perc/gain",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "g",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "Percussion gain 0..1 applied to each hit (before accent)."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
+      "name": "perc_accent",
+      "address_pattern": "/digital/perc/accent",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "a",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "Downbeat accent 0..1: extra gain on the first pulse of each beat group (gain *= 1+a)."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
       "name": "panic",
       "address_pattern": "/digital/panic",
       "parameters": {},
@@ -531,7 +615,7 @@
         }
       ],
       "lag_ms": 0.0,
-      "smoothing": "Immediate: deactivates all voices, resets gain/pan/phase defaults, clears active history; may invoke MIDI panic callback. Does not reset scene parameters such as partial_ceiling.",
+      "smoothing": "Immediate: deactivates all voices, resets gain/pan/phase defaults, clears active history, clears arp runtime (both hands) and perc pool; may invoke MIDI panic callback. Does not reset scene parameters such as partial_ceiling, clock_bpm, or perc rate/gain/accent.",
       "read": false,
       "write": true,
       "listener_port": 9002
@@ -700,6 +784,7 @@
         "settle_beats",
         "generator_enable",
         "arp.{H}.{enabled,cursor_n,step_phase,rate,direction,density,register_lo,register_hi,gate,gain}",
+        "perc.{enabled,rate,gain,accent,step_phase,pulse_index,next_slot}",
         "voices.{n}.{gain,pan,phase_deg,attack_s,release_s,shape,lfo_gain,lfo_pan,lfo_phase,active,freq,envelope_profile}"
       ],
       "related_http": [

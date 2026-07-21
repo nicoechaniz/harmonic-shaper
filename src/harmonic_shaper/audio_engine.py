@@ -25,7 +25,7 @@ except (ImportError, OSError) as exc:
     SOUNDDEVICE_IMPORT_ERROR = exc
     sd = None  # type: ignore
 
-from .state import VoiceParameterStore
+from .state import VoiceParameterStore, is_perc_voice_id
 from . import config
 from .audio_levels import soft_limit
 
@@ -143,10 +143,11 @@ class AudioEngine:
         # ── LFO + beat clock, then Shaper-owned generators ────────────
         lfo_val = self._store.advance_lfo(dt)  # -1..+1; also advances beat phase
         lfo_amount = self._store.get_lfo_amount()  # global 0..1
-        # Arpeggiator reads settled params and emits voice_on/off on its band.
+        # Arpeggiator (H=0, H=1) + foot percussion (separate pool / norm).
         self._store.advance_arp(dt)
+        self._store.advance_perc(dt)
 
-        voices = self._store.get_snapshot()  # active voices only (post-arp)
+        voices = self._store.get_snapshot()  # active voices only (post generators)
         active_ns = set(voices.keys())
         tracked_ns = set(self._voice_state.keys())
 
@@ -162,16 +163,29 @@ class AudioEngine:
         for n in active_ns & tracked_ns:
             self._voice_state[n]["params"] = voices[n]
 
-        # Per-voice normalization. Count both currently-active voices AND
-        # voices still in release tail (env > 0), because the latter still
-        # contribute to the mix until env ramps down to zero. Without this,
-        # the norm is too low during voice_on/off transitions and the mix
-        # clips (was: n_active = len(active_ns), which undercounted).
-        n_active = len(active_ns)
+        # Melodic 1/√N normalisation. Percussion pool voices (voice_id
+        # -30000..-30007) are EXCLUDED so foot hits never reduce melodic
+        # amplitude. Perc uses its own fixed scale (norm_perc = 1.0).
+        def _is_perc_key(n, state_or_params) -> bool:
+            if is_perc_voice_id(n):
+                return True
+            params = state_or_params if hasattr(state_or_params, "voice_id") else (
+                state_or_params.get("params") if isinstance(state_or_params, dict) else None
+            )
+            if params is not None and is_perc_voice_id(getattr(params, "voice_id", None)):
+                return True
+            return False
+
+        n_melodic = 0
+        for n in active_ns:
+            if not _is_perc_key(n, voices[n]):
+                n_melodic += 1
         for n, state in self._voice_state.items():
             if state["env"] > 0.001 and n not in active_ns:
-                n_active += 1
-        norm = 1.0 / (n_active ** 0.5) if n_active > 0 else 1.0
+                if not _is_perc_key(n, state):
+                    n_melodic += 1
+        norm_melodic = 1.0 / (n_melodic ** 0.5) if n_melodic > 0 else 1.0
+        norm_perc = 1.0  # dedicated pool — not diluted by melodic polyphony
 
         # Scene mask: harmonics above the ceiling enter natural release
         # (target_env=0) without hard-cutting; rising ceiling re-enables them.
@@ -186,9 +200,11 @@ class AudioEngine:
                 to_prune.append(n)
                 continue
 
+            is_perc = _is_perc_key(n, params)
             target_env = 1.0 if params.active else 0.0
             # partial_ceiling mask over fixed grid 1..32 (not a hard cut).
-            if params.harmonic_n > partial_ceiling:
+            # Perc pool keys sit outside 1..32; mask uses harmonic_n only.
+            if not is_perc and params.harmonic_n > partial_ceiling:
                 target_env = 0.0
             current_env = state["env"]
             attack_s = params.attack_s
@@ -232,7 +248,8 @@ class AudioEngine:
                 drive = 1.0 + shape * 4.0
                 sine = np.tanh(sine * drive) / np.tanh(drive)
 
-            sine *= float(mod_gain) * norm * new_env
+            voice_norm = norm_perc if is_perc else norm_melodic
+            sine *= float(mod_gain) * voice_norm * new_env
             state["phase"] = (
                 carrier_phases[-1] + 2.0 * np.pi * params.freq / self._sample_rate
             ) % (2.0 * np.pi)
