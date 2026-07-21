@@ -16,7 +16,7 @@
         "bind": "0.0.0.0",
         "namespace": "/digital",
         "config_key": "SHAPER_OSC_PORT",
-        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/panic."
+        "description": "Direct Shaper control: /digital/harmonic/*/gain|envelope|pan|phase, /digital/master, /digital/ceiling, /digital/panic."
       },
       {
         "role": "nh_broadcast_slave",
@@ -200,6 +200,27 @@
       "listener_port": 9002
     },
     {
+      "name": "partial_ceiling",
+      "address_pattern": "/digital/ceiling",
+      "parameters": {},
+      "arguments": [
+        {
+          "name": "level",
+          "type": "float32",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "polarity": "0 = only fundamental (n_max=1); 1 = full grid (n_max=32). Mapped as n_max = 1 + round(level * 31). Clamped in VoiceParameterStore.set_partial_ceiling_from_level."
+        }
+      ],
+      "lag_ms": 0.0,
+      "smoothing": "Immediate store write. Audio callback forces target_env=0 for harmonic_n > partial_ceiling so high partials enter natural release (attack_s/release_s ramp); rising ceiling re-enables them. Scene parameter — panic does not reset it.",
+      "read": true,
+      "write": true,
+      "listener_port": 9002
+    },
+    {
       "name": "panic",
       "address_pattern": "/digital/panic",
       "parameters": {},
@@ -215,7 +236,7 @@
         }
       ],
       "lag_ms": 0.0,
-      "smoothing": "Immediate: deactivates all voices, resets gain/pan/phase defaults, clears active history; may invoke MIDI panic callback.",
+      "smoothing": "Immediate: deactivates all voices, resets gain/pan/phase defaults, clears active history; may invoke MIDI panic callback. Does not reset scene parameters such as partial_ceiling.",
       "read": false,
       "write": true,
       "listener_port": 9002
@@ -379,12 +400,13 @@
         "lfo_waveform",
         "lfo_amount",
         "strum_period_s",
+        "partial_ceiling",
         "voices.{n}.{gain,pan,phase_deg,attack_s,release_s,shape,lfo_gain,lfo_pan,lfo_phase,active,freq}"
       ],
       "related_http": [
         "GET /api/state — same store.to_dict() snapshot",
         "POST /api/shaper/{n}/{param} — per-voice REST control (gain|pan|phase_deg|attack_s|release_s|shape|lfo_gain|lfo_pan|lfo_phase)",
-        "POST /api/shaper/global/{param} — global REST control (attack|release|master|sidechain|lfo_rate_divisor|lfo_waveform|lfo_amount)"
+        "POST /api/shaper/global/{param} — global REST control (attack|release|master|sidechain|lfo_rate_divisor|lfo_waveform|lfo_amount|ceiling)"
       ]
     },
     "request_address": "/digital/state",
@@ -434,7 +456,7 @@
   "discrepancies_vs_report": [
     "Report 04-digital-beacon.md §1/§5 correctly names dual ports :9001 (/beacon/*) and :9002 (/digital/*) — matches code.",
     "harmonic-shaper README currently says future namespace /shaper/*; live code uses /digital/* — CODE wins; /shaper/state dump is only planned.",
-    "REST exposes shape/LFO/envelope/sidechain; OSC direct control is only gain/pan/phase/master/panic — report mentions waveshaper/LFO/sidechain as engine features, not as OSC addresses.",
+    "REST exposes shape/LFO/envelope/sidechain; OSC direct control is gain/pan/phase/master/ceiling/panic — report mentions waveshaper/LFO/sidechain as engine features, not as OSC addresses.",
     "Template/common-voice examples often use N bounds 0..31; Shaper uses harmonic_n 1..32 — CODE wins."
   ]
 }

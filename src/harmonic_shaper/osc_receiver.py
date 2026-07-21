@@ -141,6 +141,7 @@ class ShaperOSCReceiver:
         dispatcher.map("/digital/harmonic/*/pan", self._on_pan)
         dispatcher.map("/digital/harmonic/*/phase", self._on_phase)
         dispatcher.map("/digital/master", self._on_master)
+        dispatcher.map("/digital/ceiling", self._on_ceiling)
         dispatcher.map("/digital/panic", lambda *_: self._store.panic())
         dispatcher.set_default_handler(lambda *_: None)
         self._serve(dispatcher, self._shaper_port, "shaper-direct-osc")
@@ -188,3 +189,8 @@ class ShaperOSCReceiver:
     def _on_master(self, addr, value, *_) -> None:
         del addr
         self._store.set_master_gain(float(value))
+
+    def _on_ceiling(self, addr, value, *_) -> None:
+        """``/digital/ceiling`` level 0..1 → partial_ceiling 1..32."""
+        del addr
+        self._store.set_partial_ceiling_from_level(float(value))

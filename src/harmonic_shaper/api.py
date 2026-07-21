@@ -119,6 +119,15 @@ def create_app(store: VoiceParameterStore) -> "FastAPI":
             store.set_lfo_rate_divisor(int(value))
         elif param == "lfo_amount":
             store.set_lfo_amount(value)
+        elif param == "ceiling":
+            # Body level 0..1 → integer partial_ceiling 1..32.
+            store.set_partial_ceiling_from_level(value)
+            return {
+                "ok": True,
+                "param": param,
+                "value": value,
+                "partial_ceiling": store.get_partial_ceiling(),
+            }
         else:
             raise HTTPException(400, f"unknown global param: {param}")
         return {"ok": True, "param": param, "value": value}

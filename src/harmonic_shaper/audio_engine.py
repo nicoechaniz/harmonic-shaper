@@ -169,6 +169,9 @@ class AudioEngine:
         # ── LFO: advance and get current value ────────────────────────
         lfo_val = self._store.advance_lfo(dt)  # -1..+1
         lfo_amount = self._store.get_lfo_amount()  # global 0..1
+        # Scene mask: harmonics above the ceiling enter natural release
+        # (target_env=0) without hard-cutting; rising ceiling re-enables them.
+        partial_ceiling = self._store.get_partial_ceiling()
 
         mix = np.zeros((frames, 2), dtype=np.float32)
 
@@ -180,6 +183,9 @@ class AudioEngine:
                 continue
 
             target_env = 1.0 if params.active else 0.0
+            # partial_ceiling mask over fixed grid 1..32 (not a hard cut).
+            if params.harmonic_n > partial_ceiling:
+                target_env = 0.0
             current_env = state["env"]
             attack_s = params.attack_s
             release_s = params.release_s

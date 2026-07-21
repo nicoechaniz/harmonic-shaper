@@ -45,6 +45,7 @@ def test_local_osc_table_stays_wire_compatible() -> None:
         "/digital/harmonic/*/pan",
         "/digital/harmonic/*/phase",
         "/digital/master",
+        "/digital/ceiling",
         "/digital/panic",
     }
 

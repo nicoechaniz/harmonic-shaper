@@ -85,6 +85,10 @@ class VoiceParameterStore:
         self._lfo_phase: float = 0.0             # 0..1, advances in audio callback
         self._strum_period_s: float = config.DEFAULT_STRUM_PERIOD_S
         self._strum_times: list[float] = []       # recent strum timestamps
+        # Scene mask over the fixed 1..32 harmonic grid (not voice state).
+        # High partials above the ceiling enter natural release in the audio
+        # callback; panic does not reset this value.
+        self._partial_ceiling: int = config.N_BANDS
         self._on_change = on_change
         self._panic_callback: Optional[Callable[[], None]] = None
 
@@ -257,6 +261,33 @@ class VoiceParameterStore:
         with self._lock:
             return self._master_gain
 
+    # ─── Partial ceiling (scene mask over 1..N_BANDS) ─────────────────
+
+    @staticmethod
+    def level_to_partial_ceiling(level: float) -> int:
+        """Map a continuous 0..1 level to integer ceiling n_max in 1..N_BANDS.
+
+        Wire formula: ``n_max = 1 + round(level * 31)`` with level clamped to
+        0..1.  OSC ``/digital/ceiling`` and REST global ``ceiling`` both use
+        this mapping.
+        """
+        level = max(0.0, min(1.0, float(level)))
+        return int(1 + round(level * (config.N_BANDS - 1)))
+
+    def set_partial_ceiling(self, n_max: int) -> None:
+        """Set the highest playable harmonic index (1..N_BANDS)."""
+        with self._lock:
+            self._partial_ceiling = max(1, min(config.N_BANDS, int(n_max)))
+        self._notify()
+
+    def set_partial_ceiling_from_level(self, level: float) -> None:
+        """Set ceiling from a 0..1 level (OSC/REST continuous control)."""
+        self.set_partial_ceiling(self.level_to_partial_ceiling(level))
+
+    def get_partial_ceiling(self) -> int:
+        with self._lock:
+            return self._partial_ceiling
+
     def set_global_attack(self, attack_s: float) -> None:
         with self._lock:
             self._global_attack_s = max(0.0, min(5.0, float(attack_s)))
@@ -377,6 +408,7 @@ class VoiceParameterStore:
                 self._strum_period_s = sum(intervals) / len(intervals)
 
     def panic(self) -> None:
+        """Clear all voice state. Does not reset scene params (e.g. ceiling)."""
         with self._lock:
             for v in self._voices.values():
                 v.active = False
@@ -417,6 +449,7 @@ class VoiceParameterStore:
                 "lfo_waveform": self._lfo_waveform,
                 "lfo_amount": self._lfo_amount,
                 "strum_period_s": round(self._strum_period_s, 3),
+                "partial_ceiling": self._partial_ceiling,
                 "voices": {
                     str(k): {
                         "gain": v.gain,
